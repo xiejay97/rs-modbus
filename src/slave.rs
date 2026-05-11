@@ -129,14 +129,9 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let mut data_rx = self.physical.subscribe_data();
 
         tokio::spawn(async move {
-            loop {
-                match data_rx.recv().await {
-                    Ok((data, response_fn)) => {
-                        if let Ok(frame) = application.decode(&data) {
-                            let _ = tx.send((frame, response_fn)).await;
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok((data, response_fn)) = data_rx.recv().await {
+                if let Ok(frame) = application.decode(&data) {
+                    let _ = tx.send((frame, response_fn)).await;
                 }
             }
         });
@@ -174,7 +169,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
         for model_unit in model_refs {
             let model = match models_guard.get(&model_unit) {
-                Some(m) => m,
+                Some(m) => m.as_ref(),
                 None => continue,
             };
 
@@ -261,7 +256,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC1 - Read Coils
     async fn handle_fc1(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -271,7 +266,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let address = u16::from_be_bytes([adu.data[0], adu.data[1]]);
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
 
-        if length < 1 || length > 0x07d0 {
+        if !(1..=0x07d0).contains(&length) {
             return Self::response_error(
                 application,
                 adu,
@@ -311,7 +306,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC2 - Read Discrete Inputs
     async fn handle_fc2(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -321,7 +316,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let address = u16::from_be_bytes([adu.data[0], adu.data[1]]);
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
 
-        if length < 1 || length > 0x07d0 {
+        if !(1..=0x07d0).contains(&length) {
             return Self::response_error(
                 application,
                 adu,
@@ -361,7 +356,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC3 - Read Holding Registers
     async fn handle_fc3(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -371,7 +366,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let address = u16::from_be_bytes([adu.data[0], adu.data[1]]);
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
 
-        if length < 1 || length > 0x007d {
+        if !(1..=0x007d).contains(&length) {
             return Self::response_error(
                 application,
                 adu,
@@ -411,7 +406,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC4 - Read Input Registers
     async fn handle_fc4(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -421,7 +416,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let address = u16::from_be_bytes([adu.data[0], adu.data[1]]);
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
 
-        if length < 1 || length > 0x007d {
+        if !(1..=0x007d).contains(&length) {
             return Self::response_error(
                 application,
                 adu,
@@ -461,7 +456,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC5 - Write Single Coil
     async fn handle_fc5(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -500,7 +495,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC6 - Write Single Register
     async fn handle_fc6(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -529,7 +524,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC15 - Write Multiple Coils
     async fn handle_fc15(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -540,7 +535,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
         let byte_count = adu.data[4];
 
-        if length < 1 || length > 0x07b0 || byte_count as u16 != (length + 7) / 8 {
+        if !(1..=0x07b0).contains(&length) || byte_count as u16 != (length + 7) / 8 {
             return Self::response_error(
                 application,
                 adu,
@@ -589,7 +584,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC16 - Write Multiple Registers
     async fn handle_fc16(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -600,7 +595,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let length = u16::from_be_bytes([adu.data[2], adu.data[3]]);
         let byte_count = adu.data[4];
 
-        if length < 1 || length > 0x007b || byte_count as u16 != length * 2 {
+        if !(1..=0x007b).contains(&length) || byte_count as u16 != length * 2 {
             return Self::response_error(
                 application,
                 adu,
@@ -654,7 +649,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC17 - Report Server ID
     async fn handle_fc17(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -687,7 +682,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC22 - Mask Write Register
     async fn handle_fc22(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -719,7 +714,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC23 - Read/Write Multiple Registers
     async fn handle_fc23(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -732,10 +727,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let write_length = u16::from_be_bytes([adu.data[6], adu.data[7]]);
         let byte_count = adu.data[8];
 
-        if read_length < 1
-            || read_length > 0x007d
-            || write_length < 1
-            || write_length > 0x0079
+        if !(1..=0x007d).contains(&read_length)
+            || !(1..=0x0079).contains(&write_length)
             || byte_count as u16 != write_length * 2
         {
             return Self::response_error(
@@ -795,7 +788,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     // FC43/14 - Read Device Identification
     async fn handle_fc43_14(
         application: &Arc<A>,
-        model: &Box<dyn ModbusSlaveModel>,
+        model: &dyn ModbusSlaveModel,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -819,7 +812,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                 }
             }
             0x02 => {
-                if object_id >= 0x80 || (object_id > 0x06 && object_id < 0x80) {
+                if object_id > 0x06 {
                     object_id = 0x00;
                 }
             }

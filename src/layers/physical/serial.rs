@@ -4,11 +4,11 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub struct SerialPhysicalLayer {
-    port: std::sync::Mutex<Option<Box<dyn serialport::SerialPort>>>,
-    is_open: std::sync::Mutex<bool>,
-    is_destroyed: std::sync::Mutex<bool>,
-    settings: serialport::SerialPortSettings,
+    port: Arc<std::sync::Mutex<Option<Box<dyn serialport::SerialPort>>>>,
+    is_open: Arc<std::sync::Mutex<bool>>,
+    is_destroyed: Arc<std::sync::Mutex<bool>>,
     path: String,
+    baud_rate: u32,
     data_tx: broadcast::Sender<(Vec<u8>, ResponseFn)>,
     error_tx: broadcast::Sender<ModbusError>,
     close_tx: broadcast::Sender<()>,
@@ -22,14 +22,12 @@ impl SerialPhysicalLayer {
         let (data_tx, data_rx) = broadcast::channel(16);
         let (error_tx, error_rx) = broadcast::channel(16);
         let (close_tx, close_rx) = broadcast::channel(16);
-        let mut settings = serialport::SerialPortSettings::default();
-        settings.baud_rate = baud_rate;
         Arc::new(Self {
-            port: std::sync::Mutex::new(None),
-            is_open: std::sync::Mutex::new(false),
-            is_destroyed: std::sync::Mutex::new(false),
-            settings,
+            port: Arc::new(std::sync::Mutex::new(None)),
+            is_open: Arc::new(std::sync::Mutex::new(false)),
+            is_destroyed: Arc::new(std::sync::Mutex::new(false)),
             path,
+            baud_rate,
             data_tx,
             error_tx,
             close_tx,
@@ -46,7 +44,8 @@ impl PhysicalLayer for SerialPhysicalLayer {
         if *self.is_destroyed.lock().unwrap() {
             return Err(ModbusError::PortDestroyed);
         }
-        let port = serialport::open_with_settings(&self.path, &self.settings)
+        let port = serialport::new(&self.path, self.baud_rate)
+            .open()
             .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
         *self.port.lock().unwrap() = Some(port);
         *self.is_open.lock().unwrap() = true;
@@ -54,29 +53,25 @@ impl PhysicalLayer for SerialPhysicalLayer {
         let data_tx = self.data_tx.clone();
         let error_tx = self.error_tx.clone();
         let close_tx = self.close_tx.clone();
-        let is_open = self.is_open.clone();
-        let port = self.port.clone();
+        let is_open = Arc::clone(&self.is_open);
+        let port = Arc::clone(&self.port);
 
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
             let mut buf = vec![0u8; 1024];
-            loop {
-                if let Ok(guard) = port.lock() {
-                    if let Some(ref mut p) = *guard {
-                        match p.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let data = buf[..n].to_vec();
-                                let _ = data_tx
-                                    .send((data, Arc::new(|_| Box::pin(async { Ok(()) }))));
-                            }
-                            Err(e) => {
-                                let _ = error_tx.send(ModbusError::ConnectionError(e.to_string()));
-                                break;
-                            }
+            while let Ok(mut guard) = port.lock() {
+                if let Some(ref mut p) = *guard {
+                    match p.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let data = buf[..n].to_vec();
+                            let _ = data_tx
+                                .send((data, Arc::new(|_| Box::pin(async { Ok(()) }))));
                         }
-                    } else {
-                        break;
+                        Err(e) => {
+                            let _ = error_tx.send(ModbusError::ConnectionError(e.to_string()));
+                            break;
+                        }
                     }
                 } else {
                     break;

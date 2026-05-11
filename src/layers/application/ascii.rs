@@ -26,7 +26,7 @@ pub struct AsciiApplicationLayer;
 
 impl AsciiApplicationLayer {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 

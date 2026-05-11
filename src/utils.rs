@@ -60,7 +60,7 @@ pub fn pack_coils(coils: &[bool], length: u16) -> Vec<u8> {
     let byte_count = ((length + 7) / 8) as usize;
     let mut data = Vec::with_capacity(1 + byte_count);
     data.push(byte_count as u8);
-    for (_byte_idx, chunk) in coils.chunks(8).enumerate() {
+    for chunk in coils.chunks(8) {
         let mut byte = 0u8;
         for (bit_idx, &v) in chunk.iter().enumerate() {
             if v {

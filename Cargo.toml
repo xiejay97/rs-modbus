@@ -6,7 +6,9 @@ authors = ["Xie Jay <xiejay97@gmail.com>"]
 description = "A pure Rust implementation of MODBUS protocol."
 license = "MIT"
 repository = "https://github.com/xiejay97/rs-modbus"
-keywords = ["modbus", "rtu", "ascii", "serial", "tcp", "udp"]
+documentation = "https://docs.rs/rs-modbus"
+readme = "README.md"
+keywords = ["modbus", "rtu", "serial", "tcp", "udp"]
 categories = ["network-programming", "hardware-support"]
 rust-version = "1.70"
 
@@ -19,7 +21,6 @@ serialport = { version = "4", optional = true }
 [features]
 default = []
 serial = ["dep:serialport"]
-blocking = []
 
 [dev-dependencies]
 tokio-test = "0.4"

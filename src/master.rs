@@ -443,7 +443,7 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
                 vec![
                     Self::check_unit_fc(unit, fc),
                     Arc::new(|f| {
-                        if f.adu.data.len() >= 1 {
+                        if !f.adu.data.is_empty() {
                             let len = 1 + f.adu.data[0] as usize;
                             Some(PreCheckResult::NeedLength(len))
                         } else {
