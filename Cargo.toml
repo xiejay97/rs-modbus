@@ -2,6 +2,13 @@
 name = "rs-modbus"
 version = "0.1.0"
 edition = "2021"
+authors = ["Xie Jay <xiejay97@gmail.com>"]
+description = "A pure Rust implementation of MODBUS protocol."
+license = "MIT"
+repository = "https://github.com/xiejay97/rs-modbus"
+keywords = ["modbus", "rtu", "ascii", "serial", "tcp", "udp"]
+categories = ["network-programming", "hardware-support"]
+rust-version = "1.70"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
