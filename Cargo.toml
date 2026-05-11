@@ -6,14 +6,19 @@ authors = ["Xie Jay <xiejay97@gmail.com>"]
 description = "A pure Rust implementation of MODBUS protocol."
 license = "MIT"
 repository = "https://github.com/xiejay97/rs-modbus"
+homepage = "https://github.com/xiejay97/rs-modbus"
 documentation = "https://docs.rs/rs-modbus"
 readme = "README.md"
 keywords = ["modbus", "rtu", "serial", "tcp", "udp"]
 categories = ["network-programming", "hardware-support"]
 rust-version = "1.71"
+include = ["/src", "/README.md", "/LICENSE"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "net", "sync", "time", "rt"] }
 thiserror = "1"
 async-trait = "0.1"
 serialport = { version = "4", optional = true }
@@ -23,4 +28,34 @@ default = []
 serial = ["dep:serialport"]
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "signal", "time"] }
 tokio-test = "0.4"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[[example]]
+name = "tcp_master"
+path = "examples/tcp_master.rs"
+
+[[example]]
+name = "tcp_slave"
+path = "examples/tcp_slave.rs"
+
+[[example]]
+name = "rtu_master"
+path = "examples/rtu_master.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "rtu_slave"
+path = "examples/rtu_slave.rs"
+required-features = ["serial"]
+
+[[example]]
+name = "broadcast"
+path = "examples/broadcast.rs"
+
+[[example]]
+name = "custom_function_code"
+path = "examples/custom_function_code.rs"
