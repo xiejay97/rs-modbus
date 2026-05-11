@@ -1,0 +1,18 @@
+[package]
+name = "rs-modbus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+thiserror = "1"
+async-trait = "0.1"
+serialport = { version = "4", optional = true }
+
+[features]
+default = []
+serial = ["dep:serialport"]
+blocking = []
+
+[dev-dependencies]
+tokio-test = "0.4"
