@@ -116,7 +116,7 @@ pub mod types;
 pub mod utils;
 
 // Re-export commonly used types for convenience
-pub use error::{ErrorCode, ModbusError, get_code_by_error, get_error_by_code};
+pub use error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
 pub use master::ModbusMaster;
 pub use slave::{ModbusSlave, ModbusSlaveModel};
 pub use types::{

@@ -73,7 +73,7 @@ impl PhysicalLayer for UdpPhysicalLayer {
                 .lock()
                 .await
                 .clone()
-                .unwrap_or_else(|| "0.0.0.0:502".to_string());
+                .unwrap_or_else(|| "[::]:502".to_string());
             UdpSocket::bind(&addr)
                 .await
                 .map_err(|e| ModbusError::ConnectionError(e.to_string()))?

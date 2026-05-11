@@ -19,57 +19,62 @@ pub trait ModbusSlaveModel: Send + Sync {
     fn unit(&self) -> u8;
     fn address_range(&self) -> AddressRange;
 
-    async fn intercept(
-        &self,
-        _fc: u8,
-        _data: &[u8],
-    ) -> Result<Option<Vec<u8>>, ModbusError> {
+    async fn intercept(&self, _fc: u8, _data: &[u8]) -> Result<Option<Vec<u8>>, ModbusError> {
         Ok(None)
     }
 
     async fn read_coils(&self, _address: u16, _length: u16) -> Result<Vec<bool>, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
-    async fn write_single_coil(
-        &self, _address: u16, _value: bool,
-    ) -> Result<(), ModbusError> {
+    async fn write_single_coil(&self, _address: u16, _value: bool) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
     async fn write_multiple_coils(
-        &self, _address: u16, _values: &[bool],
+        &self,
+        _address: u16,
+        _values: &[bool],
     ) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
 
     async fn read_discrete_inputs(
-        &self, _address: u16, _length: u16,
+        &self,
+        _address: u16,
+        _length: u16,
     ) -> Result<Vec<bool>, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
 
     async fn read_holding_registers(
-        &self, _address: u16, _length: u16,
+        &self,
+        _address: u16,
+        _length: u16,
     ) -> Result<Vec<u16>, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
-    async fn write_single_register(
-        &self, _address: u16, _value: u16,
-    ) -> Result<(), ModbusError> {
+    async fn write_single_register(&self, _address: u16, _value: u16) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
     async fn write_multiple_registers(
-        &self, _address: u16, _values: &[u16],
+        &self,
+        _address: u16,
+        _values: &[u16],
     ) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
     async fn mask_write_register(
-        &self, _address: u16, _and_mask: u16, _or_mask: u16,
+        &self,
+        _address: u16,
+        _and_mask: u16,
+        _or_mask: u16,
     ) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
 
     async fn read_input_registers(
-        &self, _address: u16, _length: u16,
+        &self,
+        _address: u16,
+        _length: u16,
     ) -> Result<Vec<u16>, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
@@ -77,8 +82,7 @@ pub trait ModbusSlaveModel: Send + Sync {
     async fn report_server_id(&self) -> Result<ServerId, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
-    async fn read_device_identification(
-        &self) -> Result<HashMap<u8, String>, ModbusError> {
+    async fn read_device_identification(&self) -> Result<HashMap<u8, String>, ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
 }
@@ -207,18 +211,43 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             }
 
             let result = match frame.adu.fc {
-                0x01 => Self::handle_fc1(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x02 => Self::handle_fc2(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x03 => Self::handle_fc3(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x04 => Self::handle_fc4(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x05 => Self::handle_fc5(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x06 => Self::handle_fc6(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x0f => Self::handle_fc15(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x10 => Self::handle_fc16(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x11 => Self::handle_fc17(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x16 => Self::handle_fc22(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x17 => Self::handle_fc23(application, model, &frame.adu, Arc::clone(&response)).await,
-                0x2b => Self::handle_fc43_14(application, model, &frame.adu, Arc::clone(&response)).await,
+                0x01 => {
+                    Self::handle_fc1(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x02 => {
+                    Self::handle_fc2(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x03 => {
+                    Self::handle_fc3(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x04 => {
+                    Self::handle_fc4(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x05 => {
+                    Self::handle_fc5(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x06 => {
+                    Self::handle_fc6(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x0f => {
+                    Self::handle_fc15(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x10 => {
+                    Self::handle_fc16(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x11 => {
+                    Self::handle_fc17(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x16 => {
+                    Self::handle_fc22(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x17 => {
+                    Self::handle_fc23(application, model, &frame.adu, Arc::clone(&response)).await
+                }
+                0x2b => {
+                    Self::handle_fc43_14(application, model, &frame.adu, Arc::clone(&response))
+                        .await
+                }
                 _ => {
                     Self::response_error(
                         application,
@@ -276,10 +305,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             .await;
         }
 
-        if !check_range(
-            &[address, address + length],
-            &model.address_range().coils,
-        ) {
+        if !check_range(&[address, address + length], &model.address_range().coils) {
             return Self::response_error(
                 application,
                 adu,
@@ -545,10 +571,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             .await;
         }
 
-        if !check_range(
-            &[address, address + length],
-            &model.address_range().coils,
-        ) {
+        if !check_range(&[address, address + length], &model.address_range().coils) {
             return Self::response_error(
                 application,
                 adu,
@@ -620,10 +643,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
         let values: Vec<u16> = (0..length)
             .map(|i| {
-                u16::from_be_bytes([
-                    adu.data[5 + i as usize * 2],
-                    adu.data[6 + i as usize * 2],
-                ])
+                u16::from_be_bytes([adu.data[5 + i as usize * 2], adu.data[6 + i as usize * 2]])
             })
             .collect();
 
@@ -760,18 +780,21 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
         let write_values: Vec<u16> = (0..write_length)
             .map(|i| {
-                u16::from_be_bytes([
-                    adu.data[9 + i as usize * 2],
-                    adu.data[10 + i as usize * 2],
-                ])
+                u16::from_be_bytes([adu.data[9 + i as usize * 2], adu.data[10 + i as usize * 2]])
             })
             .collect();
 
-        if let Err(e) = model.write_multiple_registers(write_address, &write_values).await {
+        if let Err(e) = model
+            .write_multiple_registers(write_address, &write_values)
+            .await
+        {
             return Self::response_error(application, adu, response, &e).await;
         }
 
-        match model.read_holding_registers(read_address, read_length).await {
+        match model
+            .read_holding_registers(read_address, read_length)
+            .await
+        {
             Ok(registers) => {
                 let response_adu = ApplicationDataUnit {
                     transaction: adu.transaction,

@@ -554,7 +554,8 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
         timeout_ms: Option<u64>,
     ) -> Result<Option<DeviceIdentification>, ModbusError> {
         let fc = 0x2b;
-        let request = ApplicationDataUnit::new(unit, fc, vec![0x0e, read_device_id_code, object_id]);
+        let request =
+            ApplicationDataUnit::new(unit, fc, vec![0x0e, read_device_id_code, object_id]);
 
         let frame = self
             .wait_response(
@@ -595,8 +596,9 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
                 for _ in 0..num_objects {
                     let obj_id = f.adu.data[idx];
                     let obj_len = f.adu.data[idx + 1] as usize;
-                    let obj_value = String::from_utf8_lossy(&f.adu.data[idx + 2..idx + 2 + obj_len])
-                        .to_string();
+                    let obj_value =
+                        String::from_utf8_lossy(&f.adu.data[idx + 2..idx + 2 + obj_len])
+                            .to_string();
                     objects.push(DeviceObject {
                         id: obj_id,
                         value: obj_value,

@@ -58,8 +58,7 @@ impl ApplicationLayer for AsciiApplicationLayer {
         }
         let mut bytes = Vec::with_capacity(hex_len / 2);
         for i in (0..hex_len).step_by(2) {
-            let byte = hex_decode_byte(data[1 + i], data[2 + i])
-                .ok_or(ModbusError::InvalidData)?;
+            let byte = hex_decode_byte(data[1 + i], data[2 + i]).ok_or(ModbusError::InvalidData)?;
             bytes.push(byte);
         }
         if bytes.len() < 3 {

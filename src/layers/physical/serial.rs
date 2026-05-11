@@ -65,8 +65,7 @@ impl PhysicalLayer for SerialPhysicalLayer {
                         Ok(0) => break,
                         Ok(n) => {
                             let data = buf[..n].to_vec();
-                            let _ = data_tx
-                                .send((data, Arc::new(|_| Box::pin(async { Ok(()) }))));
+                            let _ = data_tx.send((data, Arc::new(|_| Box::pin(async { Ok(()) }))));
                         }
                         Err(e) => {
                             let _ = error_tx.send(ModbusError::ConnectionError(e.to_string()));

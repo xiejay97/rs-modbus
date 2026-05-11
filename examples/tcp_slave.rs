@@ -35,22 +35,42 @@ impl ModbusSlaveModel for SimpleModel {
         }
     }
 
-    async fn read_coils(&self, address: u16, length: u16) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
+    async fn read_coils(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
         let guard = self.coils.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&false)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
     }
 
-    async fn write_single_coil(&self, address: u16, value: bool) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_single_coil(
+        &self,
+        address: u16,
+        value: bool,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         self.coils.lock().await.insert(address, value);
         Ok(())
     }
 
-    async fn read_holding_registers(&self, address: u16, length: u16) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
+    async fn read_holding_registers(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
         let guard = self.holding_registers.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&0)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
     }
 
-    async fn write_single_register(&self, address: u16, value: u16) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_single_register(
+        &self,
+        address: u16,
+        value: u16,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         self.holding_registers.lock().await.insert(address, value);
         Ok(())
     }
@@ -63,7 +83,9 @@ impl ModbusSlaveModel for SimpleModel {
         })
     }
 
-    async fn read_device_identification(&self) -> Result<HashMap<u8, String>, rs_modbus::error::ModbusError> {
+    async fn read_device_identification(
+        &self,
+    ) -> Result<HashMap<u8, String>, rs_modbus::error::ModbusError> {
         let mut map = HashMap::new();
         map.insert(0x00, "VendorName".to_string());
         map.insert(0x01, "ProductCode".to_string());

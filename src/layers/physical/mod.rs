@@ -42,13 +42,13 @@ mod tests {
     #[tokio::test]
     async fn test_tcp_client_server_communication() {
         let server = TcpServerPhysicalLayer::new();
-        *server.addr.lock().await = Some("127.0.0.1:1502".to_string());
+        server.set_addr("127.0.0.1:0".to_string()).await;
         server.open().await.unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let client = TcpClientPhysicalLayer::new();
-        *client.addr.lock().await = Some("127.0.0.1:1502".to_string());
+        client.set_addr(server.get_addr().await.unwrap()).await;
         client.open().await.unwrap();
 
         let mut server_rx = server.subscribe_data();
@@ -58,25 +58,21 @@ mod tests {
         let test_data = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x0a];
         client.write(&test_data).await.unwrap();
 
-        let (received, response) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            server_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (received, response) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), server_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(received, test_data);
 
         let response_data = vec![0x01, 0x03, 0x02, 0x00, 0x0a];
         response(response_data.clone()).await.unwrap();
 
-        let (client_received, _) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            client_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (client_received, _) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), client_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(client_received, response_data);
 
         client.destroy().await;
@@ -105,25 +101,21 @@ mod tests {
         let test_data = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x0a];
         client.write(&test_data).await.unwrap();
 
-        let (received, response) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            server_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (received, response) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), server_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(received, test_data);
 
         let response_data = vec![0x01, 0x03, 0x02, 0x00, 0x0a];
         response(response_data.clone()).await.unwrap();
 
-        let (client_received, _) = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            client_rx.recv(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (client_received, _) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), client_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(client_received, response_data);
 
         client.destroy().await;

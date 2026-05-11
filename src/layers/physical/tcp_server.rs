@@ -44,6 +44,10 @@ impl TcpServerPhysicalLayer {
     pub async fn set_addr(&self, addr: String) {
         *self.addr.lock().await = Some(addr);
     }
+
+    pub async fn get_addr(&self) -> Option<String> {
+        self.addr.lock().await.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -57,10 +61,11 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
             .lock()
             .await
             .clone()
-            .unwrap_or_else(|| "0.0.0.0:502".to_string());
+            .unwrap_or_else(|| "[::]:502".to_string());
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
+        *self.addr.lock().await = Some(listener.local_addr().unwrap().to_string());
         *self.is_open.lock().await = true;
 
         let data_tx = self.data_tx.clone();
@@ -82,7 +87,10 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
                             *id_guard += 1;
                             id
                         };
-                        clients.lock().await.insert(client_id, Arc::clone(&write_half));
+                        clients
+                            .lock()
+                            .await
+                            .insert(client_id, Arc::clone(&write_half));
                         let data_tx = data_tx.clone();
                         let error_tx = error_tx.clone();
                         let clients = Arc::clone(&clients);
@@ -95,18 +103,17 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
                                     Ok(n) => {
                                         let data = buf[..n].to_vec();
                                         let wh = Arc::clone(&write_half);
-                                        let response: ResponseFn = Arc::new(move |data: Vec<u8>| {
-                                            let wh = Arc::clone(&wh);
-                                            Box::pin(async move {
-                                                let mut s = wh.lock().await;
-                                                s.write_all(&data)
-                                                    .await
-                                                    .map_err(|e| {
+                                        let response: ResponseFn =
+                                            Arc::new(move |data: Vec<u8>| {
+                                                let wh = Arc::clone(&wh);
+                                                Box::pin(async move {
+                                                    let mut s = wh.lock().await;
+                                                    s.write_all(&data).await.map_err(|e| {
                                                         ModbusError::ConnectionError(e.to_string())
                                                     })?;
-                                                Ok(())
-                                            })
-                                        });
+                                                    Ok(())
+                                                })
+                                            });
                                         let _ = data_tx.send((data, response));
                                     }
                                     Err(e) => {

@@ -183,12 +183,17 @@ mod tests {
         // 10 coils
         let data = vec![0x02, 0b00000101, 0b00000011];
         let coils = parse_coils(&data, 10);
-        assert_eq!(coils, vec![true, false, true, false, false, false, false, false, true, true]);
+        assert_eq!(
+            coils,
+            vec![true, false, true, false, false, false, false, false, true, true]
+        );
     }
 
     #[test]
     fn test_pack_coils() {
-        let coils = vec![true, false, true, false, false, false, false, false, true, true];
+        let coils = vec![
+            true, false, true, false, false, false, false, false, true, true,
+        ];
         let packed = pack_coils(&coils, 10);
         assert_eq!(packed, vec![0x02, 0b00000101, 0b00000011]);
     }

@@ -81,7 +81,10 @@ mod tests {
     fn test_framed_data_unit() {
         let adu = ApplicationDataUnit::new(1, 0x03, vec![0x00, 0x01]);
         let raw = vec![0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x01, 0x03, 0x00, 0x01];
-        let frame = FramedDataUnit { adu, raw: raw.clone() };
+        let frame = FramedDataUnit {
+            adu,
+            raw: raw.clone(),
+        };
         assert_eq!(frame.raw, raw);
     }
 
@@ -115,8 +118,14 @@ mod tests {
             more_follows: false,
             next_object_id: 0x00,
             objects: vec![
-                DeviceObject { id: 0x00, value: "VendorName".to_string() },
-                DeviceObject { id: 0x01, value: "ProductCode".to_string() },
+                DeviceObject {
+                    id: 0x00,
+                    value: "VendorName".to_string(),
+                },
+                DeviceObject {
+                    id: 0x01,
+                    value: "ProductCode".to_string(),
+                },
             ],
         };
         assert_eq!(di.read_device_id_code, 0x01);

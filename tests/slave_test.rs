@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const PORT: u16 = 1502;
 const UNIT: u8 = 1;
 
 struct TestModel {
@@ -33,49 +32,72 @@ impl ModbusSlaveModel for TestModel {
         }
     }
 
-    async fn read_coils(&self, address: u16, length: u16,
+    async fn read_coils(
+        &self,
+        address: u16,
+        length: u16,
     ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
         let guard = self.coils.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&false)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
     }
 
     async fn read_discrete_inputs(
-        &self, address: u16, length: u16,
+        &self,
+        address: u16,
+        length: u16,
     ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
         let guard = self.discrete_inputs.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&false)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
     }
 
     async fn read_holding_registers(
-        &self, address: u16, length: u16,
+        &self,
+        address: u16,
+        length: u16,
     ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
         let guard = self.holding_registers.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&0)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
     }
 
     async fn read_input_registers(
-        &self, address: u16, length: u16,
+        &self,
+        address: u16,
+        length: u16,
     ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
         let guard = self.input_registers.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&0)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
     }
 
     async fn write_single_coil(
-        &self, address: u16, value: bool,
+        &self,
+        address: u16,
+        value: bool,
     ) -> Result<(), rs_modbus::error::ModbusError> {
         self.coils.lock().await.insert(address, value);
         Ok(())
     }
 
     async fn write_single_register(
-        &self, address: u16, value: u16,
+        &self,
+        address: u16,
+        value: u16,
     ) -> Result<(), rs_modbus::error::ModbusError> {
         self.holding_registers.lock().await.insert(address, value);
         Ok(())
     }
 
     async fn write_multiple_coils(
-        &self, address: u16, values: &[bool],
+        &self,
+        address: u16,
+        values: &[bool],
     ) -> Result<(), rs_modbus::error::ModbusError> {
         let mut guard = self.coils.lock().await;
         for (i, &v) in values.iter().enumerate() {
@@ -85,7 +107,9 @@ impl ModbusSlaveModel for TestModel {
     }
 
     async fn write_multiple_registers(
-        &self, address: u16, values: &[u16],
+        &self,
+        address: u16,
+        values: &[u16],
     ) -> Result<(), rs_modbus::error::ModbusError> {
         let mut guard = self.holding_registers.lock().await;
         for (i, &v) in values.iter().enumerate() {
@@ -95,7 +119,10 @@ impl ModbusSlaveModel for TestModel {
     }
 
     async fn mask_write_register(
-        &self, address: u16, and_mask: u16, or_mask: u16,
+        &self,
+        address: u16,
+        and_mask: u16,
+        or_mask: u16,
     ) -> Result<(), rs_modbus::error::ModbusError> {
         let mut guard = self.holding_registers.lock().await;
         let current = *guard.get(&address).unwrap_or(&0);
@@ -103,8 +130,7 @@ impl ModbusSlaveModel for TestModel {
         Ok(())
     }
 
-    async fn report_server_id(&self,
-    ) -> Result<ServerId, rs_modbus::error::ModbusError> {
+    async fn report_server_id(&self) -> Result<ServerId, rs_modbus::error::ModbusError> {
         Ok(ServerId {
             server_id: self.unit,
             run_indicator_status: true,
@@ -125,15 +151,16 @@ impl ModbusSlaveModel for TestModel {
 
 async fn create_slave() -> (
     ModbusSlave<TcpApplicationLayer, TcpServerPhysicalLayer>,
+    Arc<TcpServerPhysicalLayer>,
     Arc<Mutex<HashMap<u16, bool>>>,
     Arc<Mutex<HashMap<u16, bool>>>,
     Arc<Mutex<HashMap<u16, u16>>>,
     Arc<Mutex<HashMap<u16, u16>>>,
 ) {
     let physical = TcpServerPhysicalLayer::new();
-    physical.set_addr(format!("127.0.0.1:{}", PORT)).await;
+    physical.set_addr("127.0.0.1:0".to_string()).await;
     let application = TcpApplicationLayer::new();
-    let slave = ModbusSlave::new(Arc::new(application), physical);
+    let slave = ModbusSlave::new(Arc::new(application), Arc::clone(&physical));
 
     let coils = Arc::new(Mutex::new(HashMap::new()));
     let discrete_inputs = Arc::new(Mutex::new(HashMap::new()));
@@ -153,6 +180,7 @@ async fn create_slave() -> (
 
     (
         slave,
+        physical,
         coils,
         discrete_inputs,
         holding_registers,
@@ -160,9 +188,12 @@ async fn create_slave() -> (
     )
 }
 
-async fn create_master() -> ModbusMaster<TcpApplicationLayer, TcpClientPhysicalLayer> {
+async fn create_master(
+    server: &TcpServerPhysicalLayer,
+) -> ModbusMaster<TcpApplicationLayer, TcpClientPhysicalLayer> {
+    let addr = server.get_addr().await.unwrap();
     let physical = TcpClientPhysicalLayer::new();
-    physical.set_addr(format!("127.0.0.1:{}", PORT)).await;
+    physical.set_addr(addr).await;
     let application = TcpApplicationLayer::new();
     let master = ModbusMaster::new(Arc::new(application), physical, 1000);
     master.open().await.unwrap();
@@ -171,8 +202,8 @@ async fn create_master() -> ModbusMaster<TcpApplicationLayer, TcpClientPhysicalL
 
 #[tokio::test]
 async fn test_fc1_read_coils() {
-    let (slave, coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     coils.lock().await.insert(0, true);
     coils.lock().await.insert(1, false);
@@ -187,8 +218,8 @@ async fn test_fc1_read_coils() {
 
 #[tokio::test]
 async fn test_fc2_read_discrete_inputs() {
-    let (slave, _coils, discrete_inputs, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, discrete_inputs, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     discrete_inputs.lock().await.insert(10, true);
     discrete_inputs.lock().await.insert(11, true);
@@ -207,8 +238,8 @@ async fn test_fc2_read_discrete_inputs() {
 
 #[tokio::test]
 async fn test_fc3_read_holding_registers() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     holding_registers.lock().await.insert(20, 0x1234);
     holding_registers.lock().await.insert(21, 0x5678);
@@ -226,8 +257,8 @@ async fn test_fc3_read_holding_registers() {
 
 #[tokio::test]
 async fn test_fc4_read_input_registers() {
-    let (slave, _coils, _di, _hr, input_registers) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, input_registers) = create_slave().await;
+    let master = create_master(&server).await;
 
     input_registers.lock().await.insert(30, 0xabcd);
     input_registers.lock().await.insert(31, 0xef01);
@@ -245,10 +276,13 @@ async fn test_fc4_read_input_registers() {
 
 #[tokio::test]
 async fn test_fc5_write_single_coil() {
-    let (slave, coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
-    let res = master.write_single_coil(UNIT, 40, true, None).await.unwrap();
+    let res = master
+        .write_single_coil(UNIT, 40, true, None)
+        .await
+        .unwrap();
     assert_eq!(res, Some(true));
     assert_eq!(*coils.lock().await.get(&40).unwrap(), true);
 
@@ -258,8 +292,8 @@ async fn test_fc5_write_single_coil() {
 
 #[tokio::test]
 async fn test_fc6_write_single_register() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master
         .write_single_register(UNIT, 50, 0xdead, None)
@@ -274,8 +308,8 @@ async fn test_fc6_write_single_register() {
 
 #[tokio::test]
 async fn test_fc15_write_multiple_coils() {
-    let (slave, coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master
         .write_multiple_coils(UNIT, 60, &[true, false, true, true], None)
@@ -295,8 +329,8 @@ async fn test_fc15_write_multiple_coils() {
 
 #[tokio::test]
 async fn test_fc16_write_multiple_registers() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master
         .write_multiple_registers(UNIT, 70, &[0x1111, 0x2222, 0x3333], None)
@@ -315,8 +349,8 @@ async fn test_fc16_write_multiple_registers() {
 
 #[tokio::test]
 async fn test_fc17_report_server_id() {
-    let (slave, _coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master.report_server_id(UNIT, None).await.unwrap().unwrap();
     assert_eq!(res.server_id, UNIT);
@@ -329,13 +363,10 @@ async fn test_fc17_report_server_id() {
 
 #[tokio::test]
 async fn test_fc22_mask_write_register() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
-    holding_registers
-        .lock()
-        .await
-        .insert(80, 0b11110000);
+    holding_registers.lock().await.insert(80, 0b11110000);
 
     let res = master
         .mask_write_register(UNIT, 80, 0b00001111, 0b10101010, None)
@@ -344,10 +375,7 @@ async fn test_fc22_mask_write_register() {
     assert_eq!(res, Some((0b00001111, 0b10101010)));
 
     let expected = (0b11110000 & 0b00001111) | (0b10101010 & !0b00001111);
-    assert_eq!(
-        *holding_registers.lock().await.get(&80).unwrap(),
-        expected
-    );
+    assert_eq!(*holding_registers.lock().await.get(&80).unwrap(), expected);
 
     master.destroy().await;
     slave.destroy().await;
@@ -355,8 +383,8 @@ async fn test_fc22_mask_write_register() {
 
 #[tokio::test]
 async fn test_fc23_read_and_write_multiple_registers() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     holding_registers.lock().await.insert(90, 0xaaaa);
     holding_registers.lock().await.insert(91, 0xbbbb);
@@ -378,8 +406,8 @@ async fn test_fc23_read_and_write_multiple_registers() {
 
 #[tokio::test]
 async fn test_fc43_14_read_device_identification() {
-    let (slave, _coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master
         .read_device_identification(UNIT, 0x01, 0x00, None)
@@ -403,8 +431,8 @@ async fn test_fc43_14_read_device_identification() {
 
 #[tokio::test]
 async fn test_broadcast_write() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     let res = master.write_single_register(0, 100, 0x9999, None).await;
     assert_eq!(res.unwrap(), None); // broadcast returns None
@@ -412,10 +440,7 @@ async fn test_broadcast_write() {
     // Wait a bit for the slave to process
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    assert_eq!(
-        *holding_registers.lock().await.get(&100).unwrap(),
-        0x9999
-    );
+    assert_eq!(*holding_registers.lock().await.get(&100).unwrap(), 0x9999);
 
     master.destroy().await;
     slave.destroy().await;
@@ -423,8 +448,8 @@ async fn test_broadcast_write() {
 
 #[tokio::test]
 async fn test_queue_ordering() {
-    let (slave, _coils, _di, holding_registers, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, holding_registers, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     holding_registers.lock().await.insert(200, 0x0001);
     holding_registers.lock().await.insert(201, 0x0002);
@@ -456,8 +481,8 @@ async fn test_queue_ordering() {
 
 #[tokio::test]
 async fn test_illegal_data_value() {
-    let (slave, _coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     // length=0 is out of spec, should timeout (slave drops invalid request)
     let res = master.read_coils(UNIT, 0, 0, Some(200)).await;
@@ -469,8 +494,8 @@ async fn test_illegal_data_value() {
 
 #[tokio::test]
 async fn test_illegal_data_address() {
-    let (slave, _coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     // Add a second model with restricted range
     let restricted_model = TestModel {
@@ -495,15 +520,15 @@ async fn test_illegal_data_address() {
             }
         }
         async fn read_coils(
-            &self, address: u16, length: u16,
+            &self,
+            address: u16,
+            length: u16,
         ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
             self.0.read_coils(address, length).await
         }
     }
 
-    slave
-        .add(Box::new(RestrictedModel(restricted_model)))
-        .await;
+    slave.add(Box::new(RestrictedModel(restricted_model))).await;
 
     // Request to unit 2 with address out of range should get exception
     let res = master.read_coils(2, 0, 10, Some(200)).await;
@@ -517,8 +542,8 @@ async fn test_illegal_data_address() {
 
 #[tokio::test]
 async fn test_timeout() {
-    let (slave, _coils, _di, _hr, _ir) = create_slave().await;
-    let master = create_master().await;
+    let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
+    let master = create_master(&server).await;
 
     // Request to non-existent unit should timeout
     let res = master.read_coils(99, 0, 1, Some(100)).await;

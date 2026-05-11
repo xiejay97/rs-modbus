@@ -10,7 +10,7 @@ documentation = "https://docs.rs/rs-modbus"
 readme = "README.md"
 keywords = ["modbus", "rtu", "serial", "tcp", "udp"]
 categories = ["network-programming", "hardware-support"]
-rust-version = "1.70"
+rust-version = "1.71"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

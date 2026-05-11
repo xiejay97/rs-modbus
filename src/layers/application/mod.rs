@@ -54,13 +54,17 @@ mod tests {
     fn test_tcp_decode_invalid_protocol() {
         let layer = TcpApplicationLayer::new();
         let frame = vec![0x00, 0x01, 0x00, 0x01, 0x00, 0x04, 0x01, 0x03, 0x00, 0x0a];
-        assert!(matches!(layer.decode(&frame), Err(ModbusError::InvalidData)));
+        assert!(matches!(
+            layer.decode(&frame),
+            Err(ModbusError::InvalidData)
+        ));
     }
 
     #[test]
     fn test_tcp_roundtrip() {
         let layer = TcpApplicationLayer::new();
-        let adu = ApplicationDataUnit::new(1, 0x03, vec![0x00, 0x00, 0x00, 0x0a]).with_transaction(5);
+        let adu =
+            ApplicationDataUnit::new(1, 0x03, vec![0x00, 0x00, 0x00, 0x0a]).with_transaction(5);
         let encoded = layer.encode(&adu);
         let decoded = layer.decode(&encoded).unwrap();
         assert_eq!(decoded.adu.transaction, Some(5));
@@ -97,13 +101,20 @@ mod tests {
     fn test_rtu_decode_crc_fail() {
         let layer = RtuApplicationLayer::new();
         let frame = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x0a, 0xFF, 0xFF];
-        assert!(matches!(layer.decode(&frame), Err(ModbusError::CrcCheckFailed)));
+        assert!(matches!(
+            layer.decode(&frame),
+            Err(ModbusError::CrcCheckFailed)
+        ));
     }
 
     #[test]
     fn test_rtu_roundtrip() {
         let layer = RtuApplicationLayer::new();
-        let adu = ApplicationDataUnit::new(17, 0x10, vec![0x00, 0x01, 0x00, 0x02, 0x04, 0xAB, 0xCD, 0xEF, 0x01]);
+        let adu = ApplicationDataUnit::new(
+            17,
+            0x10,
+            vec![0x00, 0x01, 0x00, 0x02, 0x04, 0xAB, 0xCD, 0xEF, 0x01],
+        );
         let encoded = layer.encode(&adu);
         let decoded = layer.decode(&encoded).unwrap();
         assert_eq!(decoded.adu.unit, 17);
@@ -136,7 +147,11 @@ mod tests {
     #[test]
     fn test_ascii_roundtrip() {
         let layer = AsciiApplicationLayer::new();
-        let adu = ApplicationDataUnit::new(17, 0x10, vec![0x00, 0x01, 0x00, 0x02, 0x04, 0xAB, 0xCD, 0xEF, 0x01]);
+        let adu = ApplicationDataUnit::new(
+            17,
+            0x10,
+            vec![0x00, 0x01, 0x00, 0x02, 0x04, 0xAB, 0xCD, 0xEF, 0x01],
+        );
         let encoded = layer.encode(&adu);
         let decoded = layer.decode(&encoded).unwrap();
         assert_eq!(decoded.adu.unit, 17);
@@ -148,6 +163,9 @@ mod tests {
     fn test_ascii_decode_lrc_fail() {
         let layer = AsciiApplicationLayer::new();
         let frame = b":01030000000AFF\r\n";
-        assert!(matches!(layer.decode(frame), Err(ModbusError::LrcCheckFailed)));
+        assert!(matches!(
+            layer.decode(frame),
+            Err(ModbusError::LrcCheckFailed)
+        ));
     }
 }
