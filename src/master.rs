@@ -78,6 +78,11 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
+        // Reset the closed flag so a close()+open() cycle on the same master
+        // doesn't permanently reject subsequent requests with "Master closed".
+        // Mirrors njs-modbus 9be1165.
+        self.closed.store(false, Ordering::Release);
+
         let session = Arc::clone(&self.session);
         let mut framing_rx = self.application.subscribe_framing();
         let framing_task = tokio::spawn(async move {
@@ -207,8 +212,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         }
 
         let broadcast = request.unit == 0;
-        let uses_tid =
-            self.application.protocol() == ApplicationProtocol::Tcp && !broadcast;
+        let uses_tid = self.application.protocol() == ApplicationProtocol::Tcp && !broadcast;
 
         // Build the actual request frame. For TCP non-broadcast requests
         // we allocate a fresh TID and encode it into the MBAP header; the

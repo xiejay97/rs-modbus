@@ -52,11 +52,7 @@ impl ModbusSlaveModel for SlowSlaveModel {
             .collect())
     }
 
-    async fn write_single_register(
-        &self,
-        address: u16,
-        value: u16,
-    ) -> Result<(), ModbusError> {
+    async fn write_single_register(&self, address: u16, value: u16) -> Result<(), ModbusError> {
         self.holding_registers.lock().await.insert(address, value);
         Ok(())
     }
@@ -114,7 +110,10 @@ async fn concurrent_rejects_rtu_application_layer() {
             },
         );
     }));
-    assert!(result.is_err(), "constructing concurrent master with RTU app layer should panic");
+    assert!(
+        result.is_err(),
+        "constructing concurrent master with RTU app layer should panic"
+    );
     let payload = result.unwrap_err();
     let msg = payload
         .downcast_ref::<&'static str>()
@@ -141,7 +140,10 @@ async fn concurrent_rejects_ascii_application_layer() {
             },
         );
     }));
-    assert!(result.is_err(), "constructing concurrent master with ASCII app layer should panic");
+    assert!(
+        result.is_err(),
+        "constructing concurrent master with ASCII app layer should panic"
+    );
 }
 
 #[tokio::test]
@@ -214,7 +216,10 @@ async fn fifo_tid_validation_drops_stale_response() {
 
     // First request: timeout.
     let first = master.read_holding_registers(UNIT, 7, 1, None).await;
-    assert!(matches!(first, Err(ModbusError::Timeout)), "expected first request to time out, got: {first:?}");
+    assert!(
+        matches!(first, Err(ModbusError::Timeout)),
+        "expected first request to time out, got: {first:?}"
+    );
 
     // Let the stale slow response actually arrive at the socket buffer.
     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -269,7 +274,9 @@ async fn close_rejects_inflight_requests() {
     for (i, res) in [r1, r2].into_iter().enumerate() {
         match res {
             Err(ModbusError::InvalidState(ref s)) if s == "Master closed" => {}
-            other => panic!("read #{i} should have been rejected with \"Master closed\", got: {other:?}"),
+            other => {
+                panic!("read #{i} should have been rejected with \"Master closed\", got: {other:?}")
+            }
         }
     }
 
@@ -313,6 +320,92 @@ async fn concurrent_mode_dispatches_10_parallel_reads() {
         let value = res.unwrap().unwrap();
         let expected = 100u16 + i as u16;
         assert_eq!(value, vec![expected], "concurrent read #{i} mismatch");
+    }
+
+    master.destroy().await;
+    slave.destroy().await;
+}
+
+// ===== FIFO close() rejects queued requests waiting their turn =====
+
+#[tokio::test]
+async fn fifo_close_rejects_queued_requests() {
+    // Three FIFO requests issued in parallel against a slow slave. The
+    // first holds the lock; the other two queue up. After a short delay
+    // we call close() — every still-pending request must reject with
+    // "Master closed" rather than hang forever waiting on a now-dead lock.
+    let (slave, server, _hr) = create_slow_slave(Duration::from_millis(200)).await;
+    let master = Arc::new(
+        create_master(
+            &server,
+            ModbusMasterOptions {
+                timeout_ms: 5000,
+                concurrent: false,
+            },
+        )
+        .await,
+    );
+
+    let m0 = Arc::clone(&master);
+    let h0 = tokio::spawn(async move { m0.read_holding_registers(UNIT, 0, 1, None).await });
+    let m1 = Arc::clone(&master);
+    let h1 = tokio::spawn(async move { m1.read_holding_registers(UNIT, 1, 1, None).await });
+    let m2 = Arc::clone(&master);
+    let h2 = tokio::spawn(async move { m2.read_holding_registers(UNIT, 2, 1, None).await });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    master.close().await.expect("close should not error");
+
+    for (i, fut) in [h0, h1, h2].into_iter().enumerate() {
+        let res = fut.await.expect("task panicked");
+        match res {
+            Err(ModbusError::InvalidState(ref s)) if s == "Master closed" => {}
+            other => panic!("FIFO read #{i} should reject with \"Master closed\", got: {other:?}"),
+        }
+    }
+
+    master.destroy().await;
+    slave.destroy().await;
+}
+
+// ===== open() after close() resets the closed flag (no "Master closed" surprise) =====
+
+#[tokio::test]
+async fn reopen_after_close_allows_new_requests() {
+    // Bug 1 of njs commit 9be1165: `closed` is set in close() but never reset
+    // in open(), so any request after a close()+open() cycle was rejected
+    // with "Master closed". The fix is `closed.store(false, Ordering::...)`
+    // at the top of open().
+    let (slave, server, _hr) = create_slow_slave(Duration::from_millis(5)).await;
+    let master = create_master(
+        &server,
+        ModbusMasterOptions {
+            timeout_ms: 1000,
+            concurrent: false,
+        },
+    )
+    .await;
+
+    let first = master
+        .read_holding_registers(UNIT, 0, 1, None)
+        .await
+        .expect("first read should not error")
+        .expect("first read should not be None");
+    assert_eq!(first, vec![0u16], "pre-close read works as a sanity check");
+
+    master.close().await.expect("close should not error");
+    master.open().await.expect("reopen should succeed");
+
+    let second = master.read_holding_registers(UNIT, 7, 1, None).await;
+    match second {
+        Ok(Some(v)) => assert_eq!(
+            v,
+            vec![7u16],
+            "post-reopen read should return its own value"
+        ),
+        other => panic!(
+            "post-reopen read must succeed (not reject with \"Master closed\"), got: {other:?}"
+        ),
     }
 
     master.destroy().await;
