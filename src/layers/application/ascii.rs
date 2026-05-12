@@ -17,6 +17,17 @@ const LF: u8 = b'\n';
 /// here so a peer that never sends CR cannot grow the buffer without bound.
 const MAX_ASCII_PAYLOAD: usize = 512;
 
+/// Tunables for [`AsciiApplicationLayer::with_options`]. Mirrors njs-modbus
+/// `AsciiApplicationLayerOptions`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AsciiApplicationLayerOptions {
+    /// When `true`, accept both lowercase (`a-f`) and uppercase (`A-F`) hex
+    /// characters in inbound frames. The Modbus V1.1b3 §2.2 reference only
+    /// specifies uppercase; some legacy peers emit lowercase. Defaults to
+    /// `false` (strict — uppercase only).
+    pub lenient_hex: bool,
+}
+
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 enum FsmStatus {
     #[default]
@@ -47,26 +58,40 @@ fn hex_decode_byte(hi: u8, lo: u8) -> Option<u8> {
     Some((hi << 4) | lo)
 }
 
+fn is_hex_char(b: u8, lenient: bool) -> bool {
+    matches!(b, b'0'..=b'9' | b'A'..=b'F') || (lenient && matches!(b, b'a'..=b'f'))
+}
+
 pub struct AsciiApplicationLayer {
     role: Mutex<Option<ApplicationRole>>,
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
     states: Arc<Mutex<HashMap<ConnectionId, ConnectionState>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    pub lenient_hex: bool,
 }
 
 impl AsciiApplicationLayer {
     pub fn new<P: PhysicalLayer + 'static>(physical: Arc<P>) -> Arc<Self> {
+        Self::with_options(physical, AsciiApplicationLayerOptions::default())
+    }
+
+    pub fn with_options<P: PhysicalLayer + 'static>(
+        physical: Arc<P>,
+        options: AsciiApplicationLayerOptions,
+    ) -> Arc<Self> {
         let (framing_tx, _) = broadcast::channel(64);
         let (framing_error_tx, _) = broadcast::channel(64);
         let states: Arc<Mutex<HashMap<ConnectionId, ConnectionState>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let lenient_hex = options.lenient_hex;
         let app = Arc::new(Self {
             role: Mutex::new(None),
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
             states: Arc::clone(&states),
             tasks: Mutex::new(Vec::new()),
+            lenient_hex,
         });
 
         let mut data_rx = physical.subscribe_data();
@@ -83,6 +108,7 @@ impl AsciiApplicationLayer {
                         event.data,
                         event.response,
                         event.connection,
+                        lenient_hex,
                     ),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -116,9 +142,11 @@ fn drive_fsm(
     data: Vec<u8>,
     response: ResponseFn,
     connection: ConnectionId,
+    lenient_hex: bool,
 ) {
     let mut completed_frames: Vec<Vec<u8>> = Vec::new();
     let mut overflows: u32 = 0;
+    let mut invalid_hex: u32 = 0;
     {
         let mut guard = states.lock().unwrap();
         let state = guard.entry(Arc::clone(&connection)).or_default();
@@ -142,6 +170,14 @@ fn drive_fsm(
                             state.status = FsmStatus::Idle;
                             state.frame.clear();
                             overflows += 1;
+                        } else if !is_hex_char(other, lenient_hex) {
+                            // Reject non-hex characters immediately at reception
+                            // time. Otherwise `:01GZ00AA\r\n` would slip through
+                            // to LRC check; with a 1/256 LRC collision the bogus
+                            // frame would be routed at unit=0x00 / fc=0x00.
+                            state.status = FsmStatus::Idle;
+                            state.frame.clear();
+                            invalid_hex += 1;
                         } else {
                             state.frame.push(other);
                         }
@@ -169,6 +205,9 @@ fn drive_fsm(
     }
 
     for _ in 0..overflows {
+        let _ = framing_error_tx.send(ModbusError::InvalidData);
+    }
+    for _ in 0..invalid_hex {
         let _ = framing_error_tx.send(ModbusError::InvalidData);
     }
     for ascii_payload in completed_frames {

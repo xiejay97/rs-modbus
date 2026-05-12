@@ -79,16 +79,14 @@ mod ascii;
 mod rtu;
 mod tcp;
 
-pub use ascii::AsciiApplicationLayer;
+pub use ascii::{AsciiApplicationLayer, AsciiApplicationLayerOptions};
 pub use rtu::{FrameInterval, RtuApplicationLayer};
 pub use tcp::TcpApplicationLayer;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layers::physical::{
-        PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer,
-    };
+    use crate::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
     use std::sync::Arc;
 
     // ===== Base types =====
@@ -209,7 +207,10 @@ mod tests {
     async fn test_tcp_decode_invalid_protocol() {
         let layer = make_tcp_app();
         let frame = vec![0x00, 0x01, 0x00, 0x01, 0x00, 0x04, 0x01, 0x03, 0x00, 0x0a];
-        assert!(matches!(layer.decode(&frame), Err(ModbusError::InvalidData)));
+        assert!(matches!(
+            layer.decode(&frame),
+            Err(ModbusError::InvalidData)
+        ));
         layer.destroy().await;
     }
 
@@ -257,7 +258,10 @@ mod tests {
     async fn test_rtu_decode_crc_fail() {
         let layer = make_rtu_app();
         let frame = vec![0x01, 0x03, 0x00, 0x00, 0x00, 0x0a, 0xFF, 0xFF];
-        assert!(matches!(layer.decode(&frame), Err(ModbusError::CrcCheckFailed)));
+        assert!(matches!(
+            layer.decode(&frame),
+            Err(ModbusError::CrcCheckFailed)
+        ));
         layer.destroy().await;
     }
 
@@ -321,7 +325,10 @@ mod tests {
     async fn test_ascii_decode_lrc_fail() {
         let layer = make_ascii_app();
         let frame = b":01030000000AFF\r\n";
-        assert!(matches!(layer.decode(frame), Err(ModbusError::LrcCheckFailed)));
+        assert!(matches!(
+            layer.decode(frame),
+            Err(ModbusError::LrcCheckFailed)
+        ));
         layer.destroy().await;
     }
 
@@ -345,13 +352,10 @@ mod tests {
         let frame = vec![0x00, 0x07, 0x00, 0x00, 0x00, 0x04, 0x01, 0x03, 0x00, 0x0a];
         client.write(&frame).await.unwrap();
 
-        let f = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            framing_rx.recv(),
-        )
-        .await
-        .expect("framing event within 2s")
-        .expect("framing channel still open");
+        let f = tokio::time::timeout(tokio::time::Duration::from_secs(2), framing_rx.recv())
+            .await
+            .expect("framing event within 2s")
+            .expect("framing channel still open");
         assert_eq!(f.adu.transaction, Some(7));
         assert_eq!(f.adu.unit, 1);
         assert_eq!(f.adu.fc, 0x03);
@@ -380,13 +384,10 @@ mod tests {
         let bogus = vec![0x00, 0x07, 0x12, 0x34, 0x00, 0x04, 0x01, 0x03, 0x00, 0x0a];
         client.write(&bogus).await.unwrap();
 
-        let err = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            err_rx.recv(),
-        )
-        .await
-        .expect("framing_error event within 2s")
-        .expect("framing_error channel still open");
+        let err = tokio::time::timeout(tokio::time::Duration::from_secs(2), err_rx.recv())
+            .await
+            .expect("framing_error event within 2s")
+            .expect("framing_error channel still open");
         assert!(matches!(err, ModbusError::InvalidData));
 
         client.destroy().await;
