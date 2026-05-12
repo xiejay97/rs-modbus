@@ -9,10 +9,11 @@ use tokio::sync::broadcast;
 pub struct SerialPhysicalLayer {
     port: Arc<std::sync::Mutex<Option<Box<dyn serialport::SerialPort>>>>,
     is_open: Arc<std::sync::Mutex<bool>>,
+    is_opening: Arc<std::sync::Mutex<bool>>,
     is_destroyed: Arc<std::sync::Mutex<bool>>,
     path: String,
     baud_rate: u32,
-    connection_id: ConnectionId,
+    connection_id: Arc<std::sync::Mutex<Option<ConnectionId>>>,
     data_tx: broadcast::Sender<DataEvent>,
     write_tx: broadcast::Sender<Vec<u8>>,
     error_tx: broadcast::Sender<ModbusError>,
@@ -30,10 +31,11 @@ impl SerialPhysicalLayer {
         Arc::new(Self {
             port: Arc::new(std::sync::Mutex::new(None)),
             is_open: Arc::new(std::sync::Mutex::new(false)),
+            is_opening: Arc::new(std::sync::Mutex::new(false)),
             is_destroyed: Arc::new(std::sync::Mutex::new(false)),
             path,
             baud_rate,
-            connection_id: Arc::from(gen_connection_id("serial")),
+            connection_id: Arc::new(std::sync::Mutex::new(None)),
             data_tx,
             write_tx,
             error_tx,
@@ -57,20 +59,35 @@ impl PhysicalLayer for SerialPhysicalLayer {
         if *self.is_destroyed.lock().unwrap() {
             return Err(ModbusError::PortDestroyed);
         }
-        let port = serialport::new(&self.path, self.baud_rate)
-            .open()
-            .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
+        {
+            let opened = self.is_open.lock().unwrap();
+            let opening = self.is_opening.lock().unwrap();
+            if *opened || *opening {
+                return Err(ModbusError::PortAlreadyOpen);
+            }
+        }
+        *self.is_opening.lock().unwrap() = true;
+
+        let port = match serialport::new(&self.path, self.baud_rate).open() {
+            Ok(p) => p,
+            Err(e) => {
+                *self.is_opening.lock().unwrap() = false;
+                return Err(ModbusError::ConnectionError(e.to_string()));
+            }
+        };
         *self.port.lock().unwrap() = Some(port);
-        *self.is_open.lock().unwrap() = true;
+
+        let conn_id: ConnectionId = Arc::from(gen_connection_id("serial"));
+        *self.connection_id.lock().unwrap() = Some(Arc::clone(&conn_id));
 
         let data_tx = self.data_tx.clone();
         let error_tx = self.error_tx.clone();
         let connection_close_tx = self.connection_close_tx.clone();
         let close_tx = self.close_tx.clone();
-        let is_open = Arc::clone(&self.is_open);
+        let is_open_for_task = Arc::clone(&self.is_open);
         let port = Arc::clone(&self.port);
         let port_for_response = Arc::clone(&self.port);
-        let conn_id = Arc::clone(&self.connection_id);
+        let conn_id_for_task = Arc::clone(&conn_id);
 
         tokio::task::spawn_blocking(move || {
             use std::io::Read;
@@ -102,7 +119,7 @@ impl PhysicalLayer for SerialPhysicalLayer {
                             let _ = data_tx.send(DataEvent {
                                 data,
                                 response,
-                                connection: Arc::clone(&conn_id),
+                                connection: Arc::clone(&conn_id_for_task),
                             });
                         }
                         Err(e) => {
@@ -114,13 +131,24 @@ impl PhysicalLayer for SerialPhysicalLayer {
                     break;
                 }
             }
-            if let Ok(mut guard) = is_open.lock() {
-                *guard = false;
+            // Natural exit (port errored or removed). Emit close events
+            // exactly once via the is_open transition gate, so close() and
+            // this task don't both fire the listeners on the same session.
+            let was_open = if let Ok(mut g) = is_open_for_task.lock() {
+                let prev = *g;
+                *g = false;
+                prev
+            } else {
+                false
+            };
+            if was_open {
+                let _ = connection_close_tx.send(conn_id_for_task);
+                let _ = close_tx.send(());
             }
-            let _ = connection_close_tx.send(Arc::clone(&conn_id));
-            let _ = close_tx.send(());
         });
 
+        *self.is_open.lock().unwrap() = true;
+        *self.is_opening.lock().unwrap() = false;
         Ok(())
     }
 
@@ -144,8 +172,25 @@ impl PhysicalLayer for SerialPhysicalLayer {
     }
 
     async fn close(&self) -> Result<(), ModbusError> {
-        *self.is_open.lock().unwrap() = false;
+        let was_open = {
+            let mut g = self.is_open.lock().unwrap();
+            let prev = *g;
+            *g = false;
+            prev
+        };
+        if !was_open {
+            return Ok(());
+        }
+        // Drop the port; the spawn_blocking read loop will see the next
+        // guard hold `None` and exit (it may still be parked inside a
+        // blocking `read` until data arrives or the OS layer closes — same
+        // pre-existing limitation of the sync `serialport` API).
         *self.port.lock().unwrap() = None;
+        let conn_id_opt = self.connection_id.lock().unwrap().take();
+        if let Some(conn_id) = conn_id_opt {
+            let _ = self.connection_close_tx.send(conn_id);
+        }
+        let _ = self.close_tx.send(());
         Ok(())
     }
 

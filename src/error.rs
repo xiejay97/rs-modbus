@@ -30,6 +30,8 @@ pub enum ModbusError {
     Timeout,
     #[error("Port is not open")]
     PortNotOpen,
+    #[error("Port is already open")]
+    PortAlreadyOpen,
     #[error("Port is destroyed")]
     PortDestroyed,
     #[error("MODBUS_ERROR_CODE_{0}")]

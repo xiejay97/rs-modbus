@@ -7,13 +7,16 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, Mutex};
+use tokio::task::JoinHandle;
 
 pub struct TcpClientPhysicalLayer {
     write_half: Arc<Mutex<Option<tokio::net::tcp::OwnedWriteHalf>>>,
     is_open: Arc<Mutex<bool>>,
+    is_opening: Arc<Mutex<bool>>,
     is_destroyed: Arc<Mutex<bool>>,
     pub(crate) addr: Arc<Mutex<Option<String>>>,
     connection_id: Arc<Mutex<Option<ConnectionId>>>,
+    read_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     data_tx: broadcast::Sender<DataEvent>,
     write_tx: broadcast::Sender<Vec<u8>>,
     error_tx: broadcast::Sender<ModbusError>,
@@ -31,9 +34,11 @@ impl TcpClientPhysicalLayer {
         Arc::new(Self {
             write_half: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
+            is_opening: Arc::new(Mutex::new(false)),
             is_destroyed: Arc::new(Mutex::new(false)),
             addr: Arc::new(Mutex::new(None)),
             connection_id: Arc::new(Mutex::new(None)),
+            read_task: Arc::new(Mutex::new(None)),
             data_tx,
             write_tx,
             error_tx,
@@ -57,18 +62,30 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         if *self.is_destroyed.lock().await {
             return Err(ModbusError::PortDestroyed);
         }
+        {
+            let opened = self.is_open.lock().await;
+            let opening = self.is_opening.lock().await;
+            if *opened || *opening {
+                return Err(ModbusError::PortAlreadyOpen);
+            }
+        }
+        *self.is_opening.lock().await = true;
+
         let addr = self
             .addr
             .lock()
             .await
             .clone()
             .unwrap_or_else(|| "127.0.0.1:502".to_string());
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
+        let stream = match TcpStream::connect(&addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                *self.is_opening.lock().await = false;
+                return Err(ModbusError::ConnectionError(e.to_string()));
+            }
+        };
         let (mut read_half, write_half) = stream.into_split();
         *self.write_half.lock().await = Some(write_half);
-        *self.is_open.lock().await = true;
 
         let conn_id: ConnectionId = Arc::from(gen_connection_id("tcp-client"));
         *self.connection_id.lock().await = Some(Arc::clone(&conn_id));
@@ -77,17 +94,18 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         let error_tx = self.error_tx.clone();
         let connection_close_tx = self.connection_close_tx.clone();
         let close_tx = self.close_tx.clone();
-        let is_open = Arc::clone(&self.is_open);
-        let write_half = Arc::clone(&self.write_half);
+        let is_open_for_task = Arc::clone(&self.is_open);
+        let write_half_for_task = Arc::clone(&self.write_half);
+        let conn_id_for_task = Arc::clone(&conn_id);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 1024];
             loop {
                 match read_half.read(&mut buf).await {
                     Ok(0) => break,
                     Ok(n) => {
                         let data = buf[..n].to_vec();
-                        let wh = Arc::clone(&write_half);
+                        let wh = Arc::clone(&write_half_for_task);
                         let response: ResponseFn = Arc::new(move |data: Vec<u8>| {
                             let wh = Arc::clone(&wh);
                             Box::pin(async move {
@@ -103,7 +121,7 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
                         let _ = data_tx.send(DataEvent {
                             data,
                             response,
-                            connection: Arc::clone(&conn_id),
+                            connection: Arc::clone(&conn_id_for_task),
                         });
                     }
                     Err(e) => {
@@ -112,11 +130,25 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
                     }
                 }
             }
-            *is_open.lock().await = false;
-            let _ = connection_close_tx.send(conn_id);
-            let _ = close_tx.send(());
+            // Natural exit (peer closed or read error): emit close events
+            // exactly once. The is_open=true->false transition is the gate so
+            // close() and this task can't both fire the listeners for the
+            // same session.
+            let was_open = {
+                let mut g = is_open_for_task.lock().await;
+                let prev = *g;
+                *g = false;
+                prev
+            };
+            if was_open {
+                let _ = connection_close_tx.send(conn_id_for_task);
+                let _ = close_tx.send(());
+            }
         });
 
+        *self.read_task.lock().await = Some(handle);
+        *self.is_open.lock().await = true;
+        *self.is_opening.lock().await = false;
         Ok(())
     }
 
@@ -136,8 +168,27 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
     }
 
     async fn close(&self) -> Result<(), ModbusError> {
-        *self.is_open.lock().await = false;
+        let was_open = {
+            let mut g = self.is_open.lock().await;
+            let prev = *g;
+            *g = false;
+            prev
+        };
+        if !was_open {
+            return Ok(());
+        }
+        // Abort the read task so its OwnedReadHalf drops promptly (closes
+        // the TCP socket); otherwise reopen on the same port could collide
+        // with the lingering half-open connection.
+        if let Some(handle) = self.read_task.lock().await.take() {
+            handle.abort();
+        }
         *self.write_half.lock().await = None;
+        let conn_id_opt = self.connection_id.lock().await.take();
+        if let Some(conn_id) = conn_id_opt {
+            let _ = self.connection_close_tx.send(conn_id);
+        }
+        let _ = self.close_tx.send(());
         Ok(())
     }
 
