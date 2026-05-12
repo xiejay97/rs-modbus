@@ -72,7 +72,7 @@ mod udp;
 
 pub use tcp_client::TcpClientPhysicalLayer;
 pub use tcp_server::TcpServerPhysicalLayer;
-pub use udp::UdpPhysicalLayer;
+pub use udp::{UdpPhysicalLayer, UdpPhysicalLayerOptions};
 
 #[cfg(feature = "serial")]
 mod serial;
@@ -142,7 +142,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event.data, test_data);
-        assert!(!event.connection.is_empty(), "server should issue a connection id");
+        assert!(
+            !event.connection.is_empty(),
+            "server should issue a connection id"
+        );
 
         let response_data = vec![0x01, 0x03, 0x02, 0x00, 0x0a];
         (event.response)(response_data.clone()).await.unwrap();
@@ -218,13 +221,10 @@ mod tests {
 
         client.destroy().await;
 
-        let closed_id = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            close_rx.recv(),
-        )
-        .await
-        .expect("should receive connection_close within 2s")
-        .expect("subscribe_connection_close should yield an id");
+        let closed_id = tokio::time::timeout(tokio::time::Duration::from_secs(2), close_rx.recv())
+            .await
+            .expect("should receive connection_close within 2s")
+            .expect("subscribe_connection_close should yield an id");
         assert!(!closed_id.is_empty());
 
         server.destroy().await;

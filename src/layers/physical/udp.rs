@@ -3,10 +3,45 @@ use crate::layers::physical::{
     ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
 };
 use crate::utils::gen_connection_id;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
+
+/// Tunables for [`UdpPhysicalLayer::new_server_with_options`] /
+/// [`UdpPhysicalLayer::new_client_with_options`]. Mirrors njs-modbus
+/// `UdpPhysicalLayerOptions`.
+#[derive(Clone, Copy, Debug)]
+pub struct UdpPhysicalLayerOptions {
+    /// Server mode only. Each unique inbound rinfo (`addr:port`) gets its
+    /// own [`ConnectionId`]; if no datagram arrives within this many ms,
+    /// the connection is evicted and `connection_close` fires so upper-layer
+    /// framing state is released. Set to `0` to disable eviction. Default
+    /// `30000` (30 seconds).
+    pub idle_timeout_ms: u64,
+}
+
+impl Default for UdpPhysicalLayerOptions {
+    fn default() -> Self {
+        Self {
+            idle_timeout_ms: 30000,
+        }
+    }
+}
+
+/// Per-rinfo bookkeeping for server mode. The idle timer is replaced on every
+/// inbound datagram so that the most recent send slides the eviction deadline
+/// forward. Aborting an in-flight timer is preferable to checking `Instant`
+/// because eviction must emit `connection_close` exactly-once.
+struct RemoteEntry {
+    conn: ConnectionId,
+    idle_timer: Option<JoinHandle<()>>,
+}
+
+type RemoteMap = Arc<Mutex<HashMap<SocketAddr, RemoteEntry>>>;
 
 pub struct UdpPhysicalLayer {
     pub(crate) socket: Arc<Mutex<Option<Arc<UdpSocket>>>>,
@@ -16,7 +51,12 @@ pub struct UdpPhysicalLayer {
     pub(crate) local_addr: Arc<Mutex<Option<String>>>,
     remote_addr: Arc<Mutex<Option<String>>>,
     is_server: bool,
-    connection_id: Arc<Mutex<Option<ConnectionId>>>,
+    idle_timeout_ms: u64,
+    /// Server mode: distinct per-rinfo connection state. Client mode keeps a
+    /// single entry (lazily created on first valid inbound datagram), so the
+    /// same map type works for both at the cost of one extra `HashMap` op
+    /// per packet.
+    connections: RemoteMap,
     recv_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     data_tx: broadcast::Sender<DataEvent>,
     write_tx: broadcast::Sender<Vec<u8>>,
@@ -26,7 +66,11 @@ pub struct UdpPhysicalLayer {
 }
 
 impl UdpPhysicalLayer {
-    fn build(is_server: bool, remote_addr: Option<String>) -> Arc<Self> {
+    fn build(
+        is_server: bool,
+        remote_addr: Option<String>,
+        options: UdpPhysicalLayerOptions,
+    ) -> Arc<Self> {
         let (data_tx, _) = broadcast::channel(16);
         let (write_tx, _) = broadcast::channel(16);
         let (error_tx, _) = broadcast::channel(16);
@@ -40,7 +84,8 @@ impl UdpPhysicalLayer {
             local_addr: Arc::new(Mutex::new(None)),
             remote_addr: Arc::new(Mutex::new(remote_addr)),
             is_server,
-            connection_id: Arc::new(Mutex::new(None)),
+            idle_timeout_ms: options.idle_timeout_ms,
+            connections: Arc::new(Mutex::new(HashMap::new())),
             recv_task: Arc::new(Mutex::new(None)),
             data_tx,
             write_tx,
@@ -51,11 +96,22 @@ impl UdpPhysicalLayer {
     }
 
     pub fn new_server() -> Arc<Self> {
-        Self::build(true, None)
+        Self::build(true, None, UdpPhysicalLayerOptions::default())
+    }
+
+    pub fn new_server_with_options(options: UdpPhysicalLayerOptions) -> Arc<Self> {
+        Self::build(true, None, options)
     }
 
     pub fn new_client(remote_addr: String) -> Arc<Self> {
-        Self::build(false, Some(remote_addr))
+        Self::build(false, Some(remote_addr), UdpPhysicalLayerOptions::default())
+    }
+
+    pub fn new_client_with_options(
+        remote_addr: String,
+        options: UdpPhysicalLayerOptions,
+    ) -> Arc<Self> {
+        Self::build(false, Some(remote_addr), options)
     }
 
     pub async fn set_local_addr(&self, addr: String) {
@@ -66,8 +122,32 @@ impl UdpPhysicalLayer {
     /// `None` if the socket isn't open.
     pub async fn local_addr(&self) -> Option<String> {
         let guard = self.socket.lock().await;
-        guard.as_ref().and_then(|s| s.local_addr().ok().map(|a| a.to_string()))
+        guard
+            .as_ref()
+            .and_then(|s| s.local_addr().ok().map(|a| a.to_string()))
     }
+}
+
+/// Resolves the configured remote address to a `SocketAddr` used for source
+/// filtering in client mode. Returns `None` for unresolvable or unset
+/// addresses (filtering then degrades to "accept anything" rather than
+/// silently dropping all replies).
+fn parse_remote(remote: &str) -> Option<SocketAddr> {
+    remote.parse::<SocketAddr>().ok()
+}
+
+/// Decides whether an inbound rinfo should be accepted in client mode. The
+/// port must match the configured remote port; the address must match if
+/// the configured remote address is bound to a specific (non-wildcard) host.
+fn client_accepts(remote: &SocketAddr, rinfo: &SocketAddr) -> bool {
+    if remote.port() != rinfo.port() {
+        return false;
+    }
+    let ip = remote.ip();
+    if ip.is_unspecified() {
+        return true;
+    }
+    ip == rinfo.ip()
 }
 
 #[async_trait::async_trait]
@@ -111,27 +191,53 @@ impl PhysicalLayer for UdpPhysicalLayer {
         };
         *self.socket.lock().await = Some(Arc::clone(&socket));
 
-        let conn_id: ConnectionId = Arc::from(gen_connection_id(if self.is_server {
-            "udp-server"
+        // Fresh session — drop any state from prior open/close.
+        self.connections.lock().await.clear();
+
+        let remote_filter = if self.is_server {
+            None
         } else {
-            "udp-client"
-        }));
-        *self.connection_id.lock().await = Some(Arc::clone(&conn_id));
+            self.remote_addr
+                .lock()
+                .await
+                .as_deref()
+                .and_then(parse_remote)
+        };
 
         let data_tx = self.data_tx.clone();
         let error_tx = self.error_tx.clone();
         let connection_close_tx = self.connection_close_tx.clone();
         let close_tx = self.close_tx.clone();
         let is_open_for_task = Arc::clone(&self.is_open);
-        let conn_id_for_task = Arc::clone(&conn_id);
         let socket_for_task = Arc::clone(&socket);
+        let connections_for_task = Arc::clone(&self.connections);
+        let is_server = self.is_server;
+        let idle_timeout_ms = self.idle_timeout_ms;
 
         let handle = tokio::spawn(async move {
             let mut buf = vec![0u8; 1024];
             loop {
                 match socket_for_task.recv_from(&mut buf).await {
                     Ok((n, addr)) => {
+                        // Client mode: drop datagrams whose source rinfo does
+                        // not match the configured remote (port required;
+                        // address required only when not unspecified).
+                        if let Some(remote) = remote_filter {
+                            if !client_accepts(&remote, &addr) {
+                                continue;
+                            }
+                        }
+
                         let data = buf[..n].to_vec();
+                        let conn_id = ensure_entry(
+                            &connections_for_task,
+                            addr,
+                            is_server,
+                            idle_timeout_ms,
+                            &connection_close_tx,
+                        )
+                        .await;
+
                         let socket = Arc::clone(&socket_for_task);
                         let response: ResponseFn = Arc::new(move |data: Vec<u8>| {
                             let socket = Arc::clone(&socket);
@@ -146,7 +252,7 @@ impl PhysicalLayer for UdpPhysicalLayer {
                         let _ = data_tx.send(DataEvent {
                             data,
                             response,
-                            connection: Arc::clone(&conn_id_for_task),
+                            connection: conn_id,
                         });
                     }
                     Err(e) => {
@@ -155,9 +261,10 @@ impl PhysicalLayer for UdpPhysicalLayer {
                     }
                 }
             }
-            // Natural exit (socket errored). Emit close + connection_close
-            // exactly once via the is_open transition gate, so close() and
-            // this task don't both fire the listeners on the same session.
+            // Natural exit (socket errored). Drain all rinfo state, emit
+            // connection_close per entry, then close — exactly-once via the
+            // is_open transition gate so close() and this task don't both
+            // fire the listeners.
             let was_open = {
                 let mut g = is_open_for_task.lock().await;
                 let prev = *g;
@@ -165,7 +272,16 @@ impl PhysicalLayer for UdpPhysicalLayer {
                 prev
             };
             if was_open {
-                let _ = connection_close_tx.send(conn_id_for_task);
+                let drained: Vec<RemoteEntry> = {
+                    let mut g = connections_for_task.lock().await;
+                    g.drain().map(|(_, v)| v).collect()
+                };
+                for entry in drained {
+                    if let Some(handle) = entry.idle_timer {
+                        handle.abort();
+                    }
+                    let _ = connection_close_tx.send(entry.conn);
+                }
                 let _ = close_tx.send(());
             }
         });
@@ -215,9 +331,16 @@ impl PhysicalLayer for UdpPhysicalLayer {
             handle.abort();
         }
         *self.socket.lock().await = None;
-        let conn_id_opt = self.connection_id.lock().await.take();
-        if let Some(conn_id) = conn_id_opt {
-            let _ = self.connection_close_tx.send(conn_id);
+        // Drain rinfo state, abort idle timers, emit connection_close per.
+        let drained: Vec<RemoteEntry> = {
+            let mut g = self.connections.lock().await;
+            g.drain().map(|(_, v)| v).collect()
+        };
+        for entry in drained {
+            if let Some(handle) = entry.idle_timer {
+                handle.abort();
+            }
+            let _ = self.connection_close_tx.send(entry.conn);
         }
         let _ = self.close_tx.send(());
         Ok(())
@@ -263,4 +386,52 @@ impl PhysicalLayer for UdpPhysicalLayer {
     fn subscribe_close(&self) -> broadcast::Receiver<()> {
         self.close_tx.subscribe()
     }
+}
+
+/// Look up or insert an entry for `addr`. Server mode arms an idle eviction
+/// timer (replacing the previous one) whenever a datagram arrives; client
+/// mode never arms a timer. Returns the connection id for this rinfo.
+async fn ensure_entry(
+    map: &RemoteMap,
+    addr: SocketAddr,
+    is_server: bool,
+    idle_timeout_ms: u64,
+    connection_close_tx: &broadcast::Sender<ConnectionId>,
+) -> ConnectionId {
+    let label = if is_server {
+        "udp-server"
+    } else {
+        "udp-client"
+    };
+    let mut guard = map.lock().await;
+    let entry = guard.entry(addr).or_insert_with(|| RemoteEntry {
+        conn: Arc::from(gen_connection_id(label)),
+        idle_timer: None,
+    });
+    let conn = Arc::clone(&entry.conn);
+
+    if is_server && idle_timeout_ms > 0 {
+        if let Some(handle) = entry.idle_timer.take() {
+            handle.abort();
+        }
+        let map = Arc::clone(map);
+        let conn_id = Arc::clone(&conn);
+        let close_tx = connection_close_tx.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(idle_timeout_ms)).await;
+            let removed = {
+                let mut g = map.lock().await;
+                match g.get(&addr) {
+                    Some(e) if Arc::ptr_eq(&e.conn, &conn_id) => g.remove(&addr),
+                    _ => None,
+                }
+            };
+            if removed.is_some() {
+                let _ = close_tx.send(conn_id);
+            }
+        });
+        entry.idle_timer = Some(timer);
+    }
+
+    conn
 }
