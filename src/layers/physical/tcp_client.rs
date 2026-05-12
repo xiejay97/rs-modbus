@@ -19,20 +19,15 @@ pub struct TcpClientPhysicalLayer {
     error_tx: broadcast::Sender<ModbusError>,
     connection_close_tx: broadcast::Sender<ConnectionId>,
     close_tx: broadcast::Sender<()>,
-    _data_rx: Mutex<broadcast::Receiver<DataEvent>>,
-    _write_rx: Mutex<broadcast::Receiver<Vec<u8>>>,
-    _error_rx: Mutex<broadcast::Receiver<ModbusError>>,
-    _connection_close_rx: Mutex<broadcast::Receiver<ConnectionId>>,
-    _close_rx: Mutex<broadcast::Receiver<()>>,
 }
 
 impl TcpClientPhysicalLayer {
     pub fn new() -> Arc<Self> {
-        let (data_tx, data_rx) = broadcast::channel(16);
-        let (write_tx, write_rx) = broadcast::channel(16);
-        let (error_tx, error_rx) = broadcast::channel(16);
-        let (connection_close_tx, connection_close_rx) = broadcast::channel(16);
-        let (close_tx, close_rx) = broadcast::channel(16);
+        let (data_tx, _) = broadcast::channel(16);
+        let (write_tx, _) = broadcast::channel(16);
+        let (error_tx, _) = broadcast::channel(16);
+        let (connection_close_tx, _) = broadcast::channel(16);
+        let (close_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             write_half: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
@@ -44,11 +39,6 @@ impl TcpClientPhysicalLayer {
             error_tx,
             connection_close_tx,
             close_tx,
-            _data_rx: Mutex::new(data_rx),
-            _write_rx: Mutex::new(write_rx),
-            _error_rx: Mutex::new(error_rx),
-            _connection_close_rx: Mutex::new(connection_close_rx),
-            _close_rx: Mutex::new(close_rx),
         })
     }
 

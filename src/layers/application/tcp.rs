@@ -16,15 +16,13 @@ pub struct TcpApplicationLayer {
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
     buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
-    _framing_rx: Mutex<broadcast::Receiver<Framing>>,
-    _framing_error_rx: Mutex<broadcast::Receiver<ModbusError>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl TcpApplicationLayer {
     pub fn new<P: PhysicalLayer + 'static>(physical: Arc<P>) -> Arc<Self> {
-        let (framing_tx, framing_rx) = broadcast::channel(64);
-        let (framing_error_tx, framing_error_rx) = broadcast::channel(64);
+        let (framing_tx, _) = broadcast::channel(64);
+        let (framing_error_tx, _) = broadcast::channel(64);
         let buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let app = Arc::new(Self {
@@ -33,35 +31,41 @@ impl TcpApplicationLayer {
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
             buffers: Arc::clone(&buffers),
-            _framing_rx: Mutex::new(framing_rx),
-            _framing_error_rx: Mutex::new(framing_error_rx),
             tasks: Mutex::new(Vec::new()),
         });
 
-        // Data ingestion task.
         let mut data_rx = physical.subscribe_data();
         let buffers_for_data = Arc::clone(&buffers);
         let framing_tx_for_data = framing_tx.clone();
         let framing_error_tx_for_data = framing_error_tx.clone();
         let data_task = tokio::spawn(async move {
-            while let Ok(event) = data_rx.recv().await {
-                process_data_event(
-                    &buffers_for_data,
-                    &framing_tx_for_data,
-                    &framing_error_tx_for_data,
-                    event.data,
-                    event.response,
-                    event.connection,
-                );
+            loop {
+                match data_rx.recv().await {
+                    Ok(event) => process_data_event(
+                        &buffers_for_data,
+                        &framing_tx_for_data,
+                        &framing_error_tx_for_data,
+                        event.data,
+                        event.response,
+                        event.connection,
+                    ),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
-        // Connection-close janitor: discard the buffer for closed connections.
         let mut close_rx = physical.subscribe_connection_close();
         let buffers_for_close = Arc::clone(&buffers);
         let close_task = tokio::spawn(async move {
-            while let Ok(conn_id) = close_rx.recv().await {
-                buffers_for_close.lock().unwrap().remove(&conn_id);
+            loop {
+                match close_rx.recv().await {
+                    Ok(conn_id) => {
+                        buffers_for_close.lock().unwrap().remove(&conn_id);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
@@ -84,12 +88,18 @@ fn process_data_event(
 
     loop {
         match try_extract_frame(buffer) {
-            ExtractResult::Frame(frame_bytes) => {
-                let raw = frame_bytes.clone();
-                buffer.drain(..frame_bytes.len());
+            ExtractResult::Frame(total) => {
+                let frame_bytes: Vec<u8> = buffer.drain(..total).collect();
+                let transaction = u16::from_be_bytes([frame_bytes[0], frame_bytes[1]]);
+                let adu = ApplicationDataUnit {
+                    transaction: Some(transaction),
+                    unit: frame_bytes[6],
+                    fc: frame_bytes[7],
+                    data: frame_bytes[8..].to_vec(),
+                };
                 let _ = framing_tx.send(Framing {
-                    adu: decode_inner(&frame_bytes).expect("checked by try_extract"),
-                    raw,
+                    adu,
+                    raw: frame_bytes,
                     response: Arc::clone(&response),
                     connection: Arc::clone(&connection),
                 });
@@ -109,7 +119,7 @@ fn process_data_event(
 }
 
 enum ExtractResult {
-    Frame(Vec<u8>),
+    Frame(usize),
     Insufficient,
     Invalid,
 }
@@ -129,7 +139,7 @@ fn try_extract_frame(buffer: &[u8]) -> ExtractResult {
     if buffer.len() < total {
         return ExtractResult::Insufficient;
     }
-    ExtractResult::Frame(buffer[..total].to_vec())
+    ExtractResult::Frame(total)
 }
 
 fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {

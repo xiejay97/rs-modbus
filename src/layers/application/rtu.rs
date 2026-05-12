@@ -26,8 +26,6 @@ pub struct RtuApplicationLayer {
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
     buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
-    _framing_rx: Mutex<broadcast::Receiver<Framing>>,
-    _framing_error_rx: Mutex<broadcast::Receiver<ModbusError>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Computed millisecond timeout for the 3.5T inter-frame gap. `0` on Net
     /// transports. Currently unused at runtime (frame extraction is purely
@@ -60,8 +58,8 @@ impl RtuApplicationLayer {
             interval_between_frames,
         );
 
-        let (framing_tx, framing_rx) = broadcast::channel(64);
-        let (framing_error_tx, framing_error_rx) = broadcast::channel(64);
+        let (framing_tx, _) = broadcast::channel(64);
+        let (framing_error_tx, _) = broadcast::channel(64);
         let buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let role: Arc<Mutex<Option<ApplicationRole>>> = Arc::new(Mutex::new(None));
@@ -70,39 +68,47 @@ impl RtuApplicationLayer {
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
             buffers: Arc::clone(&buffers),
-            _framing_rx: Mutex::new(framing_rx),
-            _framing_error_rx: Mutex::new(framing_error_rx),
             tasks: Mutex::new(Vec::new()),
             interval_ms,
         });
 
-        // Data ingestion task.
         let mut data_rx = physical.subscribe_data();
         let buffers_for_data = Arc::clone(&buffers);
         let framing_tx_for_data = framing_tx.clone();
         let framing_error_tx_for_data = framing_error_tx.clone();
         let role_for_data = Arc::clone(&role);
         let data_task = tokio::spawn(async move {
-            while let Ok(event) = data_rx.recv().await {
-                let role_snapshot = *role_for_data.lock().unwrap();
-                process_data_event(
-                    &buffers_for_data,
-                    &framing_tx_for_data,
-                    &framing_error_tx_for_data,
-                    role_snapshot,
-                    event.data,
-                    event.response,
-                    event.connection,
-                );
+            loop {
+                match data_rx.recv().await {
+                    Ok(event) => {
+                        let role_snapshot = *role_for_data.lock().unwrap();
+                        process_data_event(
+                            &buffers_for_data,
+                            &framing_tx_for_data,
+                            &framing_error_tx_for_data,
+                            role_snapshot,
+                            event.data,
+                            event.response,
+                            event.connection,
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
-        // Connection-close janitor.
         let mut close_rx = physical.subscribe_connection_close();
         let buffers_for_close = Arc::clone(&buffers);
         let close_task = tokio::spawn(async move {
-            while let Ok(conn_id) = close_rx.recv().await {
-                buffers_for_close.lock().unwrap().remove(&conn_id);
+            loop {
+                match close_rx.recv().await {
+                    Ok(conn_id) => {
+                        buffers_for_close.lock().unwrap().remove(&conn_id);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
@@ -163,9 +169,13 @@ fn process_data_event(
                 if skip > 0 {
                     buffer.drain(..skip);
                 }
-                let frame_bytes: Vec<u8> = buffer[..frame_len].to_vec();
-                buffer.drain(..frame_len);
-                let adu = decode_inner(&frame_bytes).expect("checked by try_extract");
+                let frame_bytes: Vec<u8> = buffer.drain(..frame_len).collect();
+                let adu = ApplicationDataUnit {
+                    transaction: None,
+                    unit: frame_bytes[0],
+                    fc: frame_bytes[1],
+                    data: frame_bytes[2..frame_bytes.len() - 2].to_vec(),
+                };
                 let _ = framing_tx.send(Framing {
                     adu,
                     raw: frame_bytes,
@@ -222,24 +232,19 @@ fn try_extract(buffer: &[u8], is_response: bool) -> ExtractResult {
 }
 
 fn sliding_extract(buffer: &[u8]) -> ExtractResult {
-    let last_start = buffer.len().saturating_sub(MIN_FRAME_LENGTH);
-    for start in 0..=last_start {
-        let remaining = &buffer[start..];
-        let max_len = remaining.len().min(MAX_FRAME_LENGTH);
-        for len in MIN_FRAME_LENGTH..=max_len {
-            if crc_matches(remaining, len) {
-                return ExtractResult::Frame {
-                    skip: start,
-                    frame_len: len,
-                };
-            }
+    let max_len = buffer.len().min(MAX_FRAME_LENGTH);
+    for len in MIN_FRAME_LENGTH..=max_len {
+        if crc_matches(buffer, len) {
+            return ExtractResult::Frame {
+                skip: 0,
+                frame_len: len,
+            };
         }
     }
-    if buffer.len() >= MAX_FRAME_LENGTH {
-        ExtractResult::Skip
-    } else {
-        ExtractResult::Insufficient
-    }
+    // No frame starts at offset 0 (predict already failed too). Drop one byte
+    // so the next try_extract sees a fresh leading FC. Bounded per-byte work
+    // even under garbage input (the prior outer-start loop was O(N^2)).
+    ExtractResult::Skip
 }
 
 fn crc_matches(buffer: &[u8], length: usize) -> bool {

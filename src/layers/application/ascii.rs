@@ -12,6 +12,10 @@ const HEX_ENCODE: [u8; 16] = *b"0123456789ABCDEF";
 const COLON: u8 = b':';
 const CR: u8 = b'\r';
 const LF: u8 = b'\n';
+/// Maximum ASCII payload (between `:` and `\r`) we will buffer per connection.
+/// A Modbus ASCII frame encodes at most 256 bytes as 512 hex chars; we cap
+/// here so a peer that never sends CR cannot grow the buffer without bound.
+const MAX_ASCII_PAYLOAD: usize = 512;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 enum FsmStatus {
@@ -48,15 +52,13 @@ pub struct AsciiApplicationLayer {
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
     states: Arc<Mutex<HashMap<ConnectionId, ConnectionState>>>,
-    _framing_rx: Mutex<broadcast::Receiver<Framing>>,
-    _framing_error_rx: Mutex<broadcast::Receiver<ModbusError>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl AsciiApplicationLayer {
     pub fn new<P: PhysicalLayer + 'static>(physical: Arc<P>) -> Arc<Self> {
-        let (framing_tx, framing_rx) = broadcast::channel(64);
-        let (framing_error_tx, framing_error_rx) = broadcast::channel(64);
+        let (framing_tx, _) = broadcast::channel(64);
+        let (framing_error_tx, _) = broadcast::channel(64);
         let states: Arc<Mutex<HashMap<ConnectionId, ConnectionState>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let app = Arc::new(Self {
@@ -64,8 +66,6 @@ impl AsciiApplicationLayer {
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
             states: Arc::clone(&states),
-            _framing_rx: Mutex::new(framing_rx),
-            _framing_error_rx: Mutex::new(framing_error_rx),
             tasks: Mutex::new(Vec::new()),
         });
 
@@ -74,23 +74,33 @@ impl AsciiApplicationLayer {
         let framing_tx_for_data = framing_tx.clone();
         let framing_error_tx_for_data = framing_error_tx.clone();
         let data_task = tokio::spawn(async move {
-            while let Ok(event) = data_rx.recv().await {
-                drive_fsm(
-                    &states_for_data,
-                    &framing_tx_for_data,
-                    &framing_error_tx_for_data,
-                    event.data,
-                    event.response,
-                    event.connection,
-                );
+            loop {
+                match data_rx.recv().await {
+                    Ok(event) => drive_fsm(
+                        &states_for_data,
+                        &framing_tx_for_data,
+                        &framing_error_tx_for_data,
+                        event.data,
+                        event.response,
+                        event.connection,
+                    ),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
         let mut close_rx = physical.subscribe_connection_close();
         let states_for_close = Arc::clone(&states);
         let close_task = tokio::spawn(async move {
-            while let Ok(conn_id) = close_rx.recv().await {
-                states_for_close.lock().unwrap().remove(&conn_id);
+            loop {
+                match close_rx.recv().await {
+                    Ok(conn_id) => {
+                        states_for_close.lock().unwrap().remove(&conn_id);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
@@ -108,6 +118,7 @@ fn drive_fsm(
     connection: ConnectionId,
 ) {
     let mut completed_frames: Vec<Vec<u8>> = Vec::new();
+    let mut overflows: u32 = 0;
     {
         let mut guard = states.lock().unwrap();
         let state = guard.entry(Arc::clone(&connection)).or_default();
@@ -126,7 +137,15 @@ fn drive_fsm(
                     CR => {
                         state.status = FsmStatus::WaitingEnd;
                     }
-                    other => state.frame.push(other),
+                    other => {
+                        if state.frame.len() >= MAX_ASCII_PAYLOAD {
+                            state.status = FsmStatus::Idle;
+                            state.frame.clear();
+                            overflows += 1;
+                        } else {
+                            state.frame.push(other);
+                        }
+                    }
                 },
                 FsmStatus::WaitingEnd => match byte {
                     COLON => {
@@ -138,19 +157,20 @@ fn drive_fsm(
                         state.status = FsmStatus::Idle;
                     }
                     _ => {
-                        // CR not followed by LF: discard partial frame.
                         state.status = FsmStatus::Idle;
                         state.frame.clear();
                     }
                 },
             }
         }
-        // Cleanup: if FSM ended in idle and buffer empty, drop the entry.
         if matches!(state.status, FsmStatus::Idle) && state.frame.is_empty() {
             guard.remove(&connection);
         }
     }
 
+    for _ in 0..overflows {
+        let _ = framing_error_tx.send(ModbusError::InvalidData);
+    }
     for ascii_payload in completed_frames {
         match decode_payload(&ascii_payload) {
             Ok((adu, raw)) => {

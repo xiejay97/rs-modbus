@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, Mutex};
 
 type SlaveResponseFn = Arc<
@@ -111,7 +112,9 @@ pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>) -> Self {
-        let _ = application.set_role(ApplicationRole::Slave);
+        application
+            .set_role(ApplicationRole::Slave)
+            .expect("application layer is already bound to a different role");
         Self {
             application,
             physical,
@@ -130,38 +133,37 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
-        self.physical.open().await?;
-
         let (tx, mut rx) = mpsc::channel::<(FramedDataUnit, ResponseFn)>(100);
-        *self.tx.lock().await = Some(tx);
+        *self.tx.lock().await = Some(tx.clone());
 
         let application = Arc::clone(&self.application);
         let models = Arc::clone(&self.models);
-
-        // Dispatch task: pull queued frames and run FC handlers.
         tokio::spawn(async move {
             while let Some((frame, response_fn)) = rx.recv().await {
                 Self::process_frame(&application, &models, frame, response_fn).await;
             }
         });
 
-        // Framing-ingestion task: subscribe to application.framing and push
-        // into the dispatch queue. This is the same data flow as njs-modbus,
-        // where the slave hooks `application.on('framing')`.
-        let tx = self.tx.lock().await.clone().unwrap();
         let mut framing_rx = self.application.subscribe_framing();
         tokio::spawn(async move {
-            while let Ok(framing) = framing_rx.recv().await {
-                let framed = FramedDataUnit {
-                    adu: framing.adu,
-                    raw: framing.raw,
-                };
-                if tx.send((framed, framing.response)).await.is_err() {
-                    break;
+            loop {
+                match framing_rx.recv().await {
+                    Ok(framing) => {
+                        let framed = FramedDataUnit {
+                            adu: framing.adu,
+                            raw: framing.raw,
+                        };
+                        if tx.send((framed, framing.response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
                 }
             }
         });
 
+        self.physical.open().await?;
         Ok(())
     }
 

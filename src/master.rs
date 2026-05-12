@@ -6,6 +6,7 @@ use crate::types::{ApplicationDataUnit, DeviceIdentification, DeviceObject, Serv
 use crate::utils::{parse_coils, parse_registers};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 
 pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
@@ -18,7 +19,9 @@ pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>, timeout_ms: u64) -> Self {
-        let _ = application.set_role(ApplicationRole::Master);
+        application
+            .set_role(ApplicationRole::Master)
+            .expect("application layer is already bound to a different role");
         Self {
             application,
             physical,
@@ -29,22 +32,27 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
-        self.physical.open().await?;
-
-        // Pipe framing → session.handle_frame, framing_error → session.handle_error.
         let session = Arc::clone(&self.session);
         let mut framing_rx = self.application.subscribe_framing();
         let framing_task = tokio::spawn(async move {
-            while let Ok(frame) = framing_rx.recv().await {
-                session.handle_frame(frame);
+            loop {
+                match framing_rx.recv().await {
+                    Ok(frame) => session.handle_frame(frame),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
             }
         });
 
         let session = Arc::clone(&self.session);
         let mut error_rx = self.application.subscribe_framing_error();
         let error_task = tokio::spawn(async move {
-            while let Ok(err) = error_rx.recv().await {
-                session.handle_error(err);
+            loop {
+                match error_rx.recv().await {
+                    Ok(err) => session.handle_error(err),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
             }
         });
 
@@ -52,6 +60,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .lock()
             .unwrap()
             .extend([framing_task, error_task]);
+
+        self.physical.open().await?;
         Ok(())
     }
 
