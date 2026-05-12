@@ -107,6 +107,7 @@
 pub mod error;
 pub mod layers;
 pub mod master;
+pub mod master_session;
 pub mod slave;
 pub mod types;
 pub mod utils;
@@ -118,6 +119,7 @@ pub use layers::physical::{
     ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
 };
 pub use master::ModbusMaster;
+pub use master_session::{MasterSession, PreCheck, PreCheckOutcome};
 pub use slave::{ModbusSlave, ModbusSlaveModel};
 pub use types::{
     AddressRange, ApplicationDataUnit, DeviceIdentification, DeviceObject, FramedDataUnit, ServerId,

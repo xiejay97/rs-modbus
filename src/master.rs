@@ -1,45 +1,58 @@
 use crate::error::ModbusError;
-use crate::layers::application::{ApplicationLayer, ApplicationRole};
+use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
 use crate::layers::physical::PhysicalLayer;
-use crate::types::{
-    ApplicationDataUnit, DeviceIdentification, DeviceObject, FramedDataUnit, ServerId,
-};
+use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome};
+use crate::types::{ApplicationDataUnit, DeviceIdentification, DeviceObject, ServerId};
 use crate::utils::{parse_coils, parse_registers};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-#[derive(Clone)]
-pub enum PreCheckResult {
-    Ok,
-    NeedLength(usize),
-    Fail,
-}
-
-pub type PreCheck = Arc<dyn Fn(&FramedDataUnit) -> Option<PreCheckResult> + Send + Sync>;
+use tokio::task::JoinHandle;
 
 pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
     application: Arc<A>,
     physical: Arc<P>,
+    session: Arc<MasterSession>,
     pub timeout_ms: u64,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
+impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>, timeout_ms: u64) -> Self {
-        // Best-effort role binding. If it fails (already bound to Slave), the
-        // caller misused the layer; in that case the master will still operate
-        // but RTU/ASCII frame extraction may use the wrong direction. We
-        // expose role conflicts via `ApplicationLayer::set_role` returning
-        // `InvalidState`; we ignore it here because `new` is infallible.
         let _ = application.set_role(ApplicationRole::Master);
         Self {
             application,
             physical,
+            session: Arc::new(MasterSession::new()),
             timeout_ms,
+            tasks: Mutex::new(Vec::new()),
         }
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
-        self.physical.open().await
+        self.physical.open().await?;
+
+        // Pipe framing → session.handle_frame, framing_error → session.handle_error.
+        let session = Arc::clone(&self.session);
+        let mut framing_rx = self.application.subscribe_framing();
+        let framing_task = tokio::spawn(async move {
+            while let Ok(frame) = framing_rx.recv().await {
+                session.handle_frame(frame);
+            }
+        });
+
+        let session = Arc::clone(&self.session);
+        let mut error_rx = self.application.subscribe_framing_error();
+        let error_task = tokio::spawn(async move {
+            while let Ok(err) = error_rx.recv().await {
+                session.handle_error(err);
+            }
+        });
+
+        self.tasks
+            .lock()
+            .unwrap()
+            .extend([framing_task, error_task]);
+        Ok(())
     }
 
     pub async fn close(&self) -> Result<(), ModbusError> {
@@ -47,39 +60,46 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
     }
 
     pub async fn destroy(&self) {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
+        self.application.destroy().await;
         let _ = self.physical.destroy().await;
     }
 
     fn check_unit_fc(unit: u8, fc: u8) -> PreCheck {
-        Arc::new(move |f| {
+        Arc::new(move |f: &Framing| {
             if f.adu.unit == unit && f.adu.fc == fc {
-                Some(PreCheckResult::Ok)
+                PreCheckOutcome::Pass
             } else {
-                Some(PreCheckResult::Fail)
+                PreCheckOutcome::Fail(ModbusError::InvalidResponse)
             }
         })
     }
 
     fn check_length(expected: usize) -> PreCheck {
-        Arc::new(move |_| Some(PreCheckResult::NeedLength(expected)))
+        Arc::new(move |_: &Framing| PreCheckOutcome::NeedLength(expected))
     }
 
     fn check_byte_count(expected: usize) -> PreCheck {
-        Arc::new(move |f| {
-            if f.adu.data[0] as usize == expected {
-                Some(PreCheckResult::Ok)
+        Arc::new(move |f: &Framing| {
+            if !f.adu.data.is_empty() && f.adu.data[0] as usize == expected {
+                PreCheckOutcome::Pass
             } else {
-                Some(PreCheckResult::Fail)
+                PreCheckOutcome::Fail(ModbusError::InvalidResponse)
             }
         })
     }
 
     fn check_echo(expected: Vec<u8>) -> PreCheck {
-        Arc::new(move |f| {
+        Arc::new(move |f: &Framing| {
             if f.adu.data == expected {
-                Some(PreCheckResult::Ok)
+                PreCheckOutcome::Pass
             } else {
-                Some(PreCheckResult::Fail)
+                PreCheckOutcome::Fail(ModbusError::InvalidResponse)
             }
         })
     }
@@ -89,7 +109,8 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
         request: &ApplicationDataUnit,
         checks: Vec<PreCheck>,
         timeout_ms: u64,
-    ) -> Result<Option<FramedDataUnit>, ModbusError> {
+    ) -> Result<Option<Framing>, ModbusError> {
+        self.application.flush();
         let data = self.application.encode(request);
         self.physical.write(&data).await?;
 
@@ -97,45 +118,21 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
             return Ok(None);
         }
 
-        let mut rx = self.physical.subscribe_data();
+        let rx = self.session.start_waiting(checks);
         let timeout = Duration::from_millis(timeout_ms);
-
-        let result = tokio::time::timeout(timeout, async {
-            loop {
-                let event = rx.recv().await.map_err(|_| ModbusError::Timeout)?;
-                let frame = self.application.decode(&event.data)?;
-
-                let mut matched = true;
-                for check in &checks {
-                    match check(&frame) {
-                        Some(PreCheckResult::Ok) => {}
-                        Some(PreCheckResult::NeedLength(expected)) => {
-                            if frame.adu.data.len() < expected {
-                                matched = false;
-                                break;
-                            }
-                            if frame.adu.data.len() != expected {
-                                return Err(ModbusError::InvalidResponse);
-                            }
-                        }
-                        Some(PreCheckResult::Fail) => {
-                            return Err(ModbusError::InvalidResponse);
-                        }
-                        None => {
-                            return Err(ModbusError::InsufficientData);
-                        }
-                    }
-                }
-                if matched {
-                    return Ok(frame);
-                }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(frame))) => Ok(Some(frame)),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_)) => {
+                // Receiver dropped (e.g. session.stop_waiting elsewhere).
+                Err(ModbusError::InvalidState(
+                    "master session was cleared while waiting".into(),
+                ))
             }
-        })
-        .await;
-
-        match result {
-            Ok(r) => Ok(Some(r?)),
-            Err(_) => Err(ModbusError::Timeout),
+            Err(_) => {
+                self.session.stop_waiting();
+                Err(ModbusError::Timeout)
+            }
         }
     }
 
@@ -448,12 +445,12 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
                 &request,
                 vec![
                     Self::check_unit_fc(unit, fc),
-                    Arc::new(|f| {
+                    Arc::new(|f: &Framing| {
                         if !f.adu.data.is_empty() {
                             let len = 1 + f.adu.data[0] as usize;
-                            Some(PreCheckResult::NeedLength(len))
+                            PreCheckOutcome::NeedLength(len)
                         } else {
-                            None
+                            PreCheckOutcome::InsufficientData
                         }
                     }),
                 ],
@@ -568,7 +565,7 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
                 &request,
                 vec![
                     Self::check_unit_fc(unit, fc),
-                    Arc::new(move |f| {
+                    Arc::new(move |f: &Framing| {
                         if f.adu.data.len() >= 6
                             && f.adu.data[0] == 0x0e
                             && f.adu.data[1] == read_device_id_code
@@ -578,15 +575,15 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
                             let mut idx = 6;
                             for _ in 0..num_objects {
                                 if idx + 2 > f.adu.data.len() {
-                                    return None;
+                                    return PreCheckOutcome::InsufficientData;
                                 }
                                 let obj_len = f.adu.data[idx + 1] as usize;
                                 total += 2 + obj_len;
                                 idx += 2 + obj_len;
                             }
-                            Some(PreCheckResult::NeedLength(total))
+                            PreCheckOutcome::NeedLength(total)
                         } else {
-                            Some(PreCheckResult::Fail)
+                            PreCheckOutcome::Fail(ModbusError::InvalidResponse)
                         }
                     }),
                 ],
