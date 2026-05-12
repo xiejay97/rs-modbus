@@ -1,6 +1,6 @@
 use rs_modbus::layers::application::TcpApplicationLayer;
 use rs_modbus::layers::physical::{TcpClientPhysicalLayer, TcpServerPhysicalLayer};
-use rs_modbus::master::ModbusMaster;
+use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
 use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
 use rs_modbus::types::{AddressRange, ServerId};
 use std::collections::HashMap;
@@ -195,7 +195,14 @@ async fn create_master(
     let physical = TcpClientPhysicalLayer::new();
     physical.set_addr(addr).await;
     let application = TcpApplicationLayer::new(physical.clone());
-    let master = ModbusMaster::new(application, physical, 1000);
+    let master = ModbusMaster::new(
+        application,
+        physical,
+        ModbusMasterOptions {
+            timeout_ms: 1000,
+            concurrent: false,
+        },
+    );
     master.open().await.unwrap();
     master
 }

@@ -1,13 +1,19 @@
 use rs_modbus::layers::application::TcpApplicationLayer;
 use rs_modbus::layers::physical::TcpClientPhysicalLayer;
-use rs_modbus::master::ModbusMaster;
+use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let physical = TcpClientPhysicalLayer::new();
-    physical.set_addr("127.0.0.1:502".to_string()).await;
     let application = TcpApplicationLayer::new(physical.clone());
-    let master = ModbusMaster::new(application, physical, 5000);
+    let master = ModbusMaster::new(
+        application,
+        physical,
+        ModbusMasterOptions {
+            timeout_ms: 5000,
+            concurrent: false,
+        },
+    );
 
     master.open().await?;
 

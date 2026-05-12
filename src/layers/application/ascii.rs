@@ -1,5 +1,5 @@
 use crate::error::ModbusError;
-use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
+use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
 use crate::utils::lrc;
@@ -240,6 +240,10 @@ impl ApplicationLayer for AsciiApplicationLayer {
 
     fn role(&self) -> Option<ApplicationRole> {
         *self.role.lock().unwrap()
+    }
+
+    fn protocol(&self) -> ApplicationProtocol {
+        ApplicationProtocol::Ascii
     }
 
     fn encode(&self, adu: &ApplicationDataUnit) -> Vec<u8> {

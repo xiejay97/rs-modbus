@@ -51,14 +51,13 @@ impl ModbusSlaveModel for CustomModel {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let physical = TcpServerPhysicalLayer::new();
-    physical.set_addr("0.0.0.0:502".to_string()).await;
     let application = TcpApplicationLayer::new(physical.clone());
     let slave = ModbusSlave::new(application, physical);
 
     slave.add(Box::new(CustomModel)).await;
     slave.open().await?;
 
-    println!("Slave listening on 0.0.0.0:502");
+    println!("Slave listening on [::]:502 (default)");
     println!("Custom FC 0x64 (100) will echo back data + 0xAB signature");
 
     tokio::signal::ctrl_c().await?;

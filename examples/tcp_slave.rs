@@ -97,7 +97,6 @@ impl ModbusSlaveModel for SimpleModel {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let physical = TcpServerPhysicalLayer::new();
-    physical.set_addr("0.0.0.0:502".to_string()).await;
     let application = TcpApplicationLayer::new(physical.clone());
     let slave = ModbusSlave::new(application, physical);
 
@@ -111,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     slave.add(Box::new(model)).await;
     slave.open().await?;
 
-    println!("Slave listening on 0.0.0.0:502");
+    println!("Slave listening on [::]:502 (default)");
 
     // Keep running until interrupted
     tokio::signal::ctrl_c().await?;

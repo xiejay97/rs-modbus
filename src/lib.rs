@@ -48,14 +48,20 @@
 //! ```no_run
 //! use rs_modbus::layers::application::TcpApplicationLayer;
 //! use rs_modbus::layers::physical::TcpClientPhysicalLayer;
-//! use rs_modbus::master::ModbusMaster;
+//! use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let physical = TcpClientPhysicalLayer::new();
-//!     physical.set_addr("127.0.0.1:502".to_string()).await;
 //!     let application = TcpApplicationLayer::new(physical.clone());
-//!     let master = ModbusMaster::new(application, physical, 5000);
+//!     let master = ModbusMaster::new(
+//!         application,
+//!         physical,
+//!         ModbusMasterOptions {
+//!             timeout_ms: 5000,
+//!             concurrent: false,
+//!         },
+//!     );
 //!
 //!     master.open().await?;
 //!     let res = master.read_holding_registers(1, 0, 10, None).await?;
@@ -93,7 +99,6 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let physical = TcpServerPhysicalLayer::new();
-//!     physical.set_addr("0.0.0.0:502".to_string()).await;
 //!     let application = TcpApplicationLayer::new(physical.clone());
 //!     let slave = ModbusSlave::new(application, physical);
 //!
@@ -114,11 +119,11 @@ pub mod utils;
 
 // Re-export commonly used types for convenience
 pub use error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
-pub use layers::application::{ApplicationLayer, ApplicationRole, Framing};
+pub use layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 pub use layers::physical::{
     ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
 };
-pub use master::ModbusMaster;
+pub use master::{ModbusMaster, ModbusMasterOptions};
 pub use master_session::{MasterSession, PreCheck, PreCheckOutcome};
 pub use slave::{ModbusSlave, ModbusSlaveModel};
 pub use types::{

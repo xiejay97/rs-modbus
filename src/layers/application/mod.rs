@@ -14,6 +14,17 @@ pub enum ApplicationRole {
     Slave,
 }
 
+/// Wire protocol implemented by an [`ApplicationLayer`]. Exposed through
+/// [`ApplicationLayer::protocol`] so callers (master, slave, tests) can
+/// gate protocol-specific behavior — notably, `ModbusMaster` uses it to
+/// reject `concurrent: true` configurations on non-TCP layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationProtocol {
+    Tcp,
+    Rtu,
+    Ascii,
+}
+
 /// A successfully framed PDU emitted by an [`ApplicationLayer`] via
 /// `subscribe_framing`. Carries the parsed ADU, the raw bytes that produced it,
 /// the per-message reply closure, and the connection it came from.
@@ -34,6 +45,10 @@ pub trait ApplicationLayer: Send + Sync {
 
     /// Current role, or `None` if not yet assigned.
     fn role(&self) -> Option<ApplicationRole>;
+
+    /// Wire protocol implemented by this layer. Used by `ModbusMaster` to
+    /// validate `concurrent` configuration at construction time.
+    fn protocol(&self) -> ApplicationProtocol;
 
     /// Encode an ADU into wire bytes per the protocol's framing format
     /// (MBAP for TCP, CRC for RTU, hex+LRC for ASCII).

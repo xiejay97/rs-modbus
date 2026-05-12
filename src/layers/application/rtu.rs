@@ -1,5 +1,5 @@
 use crate::error::ModbusError;
-use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
+use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
 use crate::utils::{crc, crc_with_seed, predict_rtu_frame_length};
@@ -309,6 +309,10 @@ impl ApplicationLayer for RtuApplicationLayer {
 
     fn role(&self) -> Option<ApplicationRole> {
         self.role_snapshot()
+    }
+
+    fn protocol(&self) -> ApplicationProtocol {
+        ApplicationProtocol::Rtu
     }
 
     fn encode(&self, adu: &ApplicationDataUnit) -> Vec<u8> {

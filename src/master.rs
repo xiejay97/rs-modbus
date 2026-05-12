@@ -1,24 +1,55 @@
 use crate::error::ModbusError;
-use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
+use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::PhysicalLayer;
-use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome};
+use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
 use crate::types::{ApplicationDataUnit, DeviceIdentification, DeviceObject, ServerId};
 use crate::utils::{parse_coils, parse_registers};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
+
+/// Tunables for [`ModbusMaster::new`]. Mirrors njs-modbus
+/// `ModbusMasterOptions`.
+#[derive(Clone, Copy, Debug)]
+pub struct ModbusMasterOptions {
+    /// Per-request timeout in ms when the caller does not pass an explicit
+    /// timeout. Defaults to 1000.
+    pub timeout_ms: u64,
+    /// Enable pipelined concurrent requests on a single connection. Only
+    /// valid for Modbus TCP application layers — constructing a master with
+    /// `concurrent: true` on RTU or ASCII layers panics. Defaults to
+    /// `false` (FIFO queue, requests are serialized).
+    pub concurrent: bool,
+}
+
+impl Default for ModbusMasterOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 1000,
+            concurrent: false,
+        }
+    }
+}
 
 pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
     application: Arc<A>,
     physical: Arc<P>,
     session: Arc<MasterSession>,
     pub timeout_ms: u64,
+    pub concurrent: bool,
+    next_tid: AtomicU16,
+    closed: AtomicBool,
+    queue_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, P> {
-    pub fn new(application: Arc<A>, physical: Arc<P>, timeout_ms: u64) -> Self {
+    pub fn new(application: Arc<A>, physical: Arc<P>, options: ModbusMasterOptions) -> Self {
+        if options.concurrent && application.protocol() != ApplicationProtocol::Tcp {
+            panic!("concurrent mode requires a Modbus TCP application layer");
+        }
         application
             .set_role(ApplicationRole::Master)
             .expect("application layer is already bound to a different role");
@@ -26,9 +57,24 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             application,
             physical,
             session: Arc::new(MasterSession::new()),
-            timeout_ms,
+            timeout_ms: options.timeout_ms,
+            concurrent: options.concurrent,
+            next_tid: AtomicU16::new(1),
+            closed: AtomicBool::new(false),
+            queue_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Allocate the next transaction ID. Cycles through `1..=65535`,
+    /// skipping `0` on wrap. Matches njs-modbus `_nextTid` semantics.
+    fn allocate_tid(&self) -> u16 {
+        self.next_tid
+            .fetch_update(Ordering::Release, Ordering::Acquire, |t| {
+                let next = if t == 65535 { 1 } else { t + 1 };
+                Some(next)
+            })
+            .unwrap()
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
@@ -66,10 +112,20 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
     }
 
     pub async fn close(&self) -> Result<(), ModbusError> {
+        // Mark closed BEFORE rejecting waiters so any racing new requests
+        // see the flag and bail out from `wait_response` directly. Reject
+        // every in-flight waiter so callers don't have to wait for the
+        // (now-disconnected) socket to time out.
+        self.closed.store(true, Ordering::Release);
+        self.session
+            .stop_all(ModbusError::InvalidState("Master closed".into()));
         self.physical.close().await
     }
 
     pub async fn destroy(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.session
+            .stop_all(ModbusError::InvalidState("Master destroyed".into()));
         {
             let mut tasks = self.tasks.lock().unwrap();
             for task in tasks.drain(..) {
@@ -120,27 +176,103 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         checks: Vec<PreCheck>,
         timeout_ms: u64,
     ) -> Result<Option<Framing>, ModbusError> {
-        self.application.flush();
-        let data = self.application.encode(request);
-        self.physical.write(&data).await?;
+        // Reject up-front so a newly issued call after `close()` doesn't
+        // hit the socket. Necessary in concurrent mode (no queue lock) and
+        // also covers the rare case where a FIFO caller starts mid-close.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ModbusError::InvalidState("Master closed".into()));
+        }
 
-        if request.unit == 0 {
+        // FIFO mode: serialize call-sites via the queue lock so two callers
+        // can't trample each other's MasterSession waiter slot. Concurrent
+        // mode dispatches without holding the lock — each TCP request gets
+        // its own TID-keyed waiter slot.
+        let _queue_guard = if self.concurrent {
+            None
+        } else {
+            Some(self.queue_lock.lock().await)
+        };
+
+        // A close() may have landed while we were waiting for the queue
+        // lock. Re-check before allocating a TID / writing.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ModbusError::InvalidState("Master closed".into()));
+        }
+
+        // FIFO mode: drop stale buffer state from the previous request
+        // before sending. Concurrent mode must NOT flush because other
+        // in-flight requests share the application-layer buffer.
+        if !self.concurrent {
+            self.application.flush();
+        }
+
+        let broadcast = request.unit == 0;
+        let uses_tid =
+            self.application.protocol() == ApplicationProtocol::Tcp && !broadcast;
+
+        // Build the actual request frame. For TCP non-broadcast requests
+        // we allocate a fresh TID and encode it into the MBAP header; the
+        // slave echoes that TID back on its response so we can demux
+        // pipelined replies.
+        let (encoded, key) = if uses_tid {
+            let tid = self.allocate_tid();
+            let adu = ApplicationDataUnit {
+                transaction: Some(tid),
+                unit: request.unit,
+                fc: request.fc,
+                data: request.data.clone(),
+            };
+            (self.application.encode(&adu), WaiterKey::Tid(tid))
+        } else {
+            (self.application.encode(request), WaiterKey::Fifo)
+        };
+
+        // Pre-check chain. When TID is used, prepend a TID match so any
+        // stale response from a previous request (or a different in-flight
+        // one) fails fast.
+        let final_checks: Vec<PreCheck> = if let WaiterKey::Tid(tid) = key {
+            let mut v: Vec<PreCheck> = Vec::with_capacity(checks.len() + 1);
+            v.push(Arc::new(move |f: &Framing| {
+                if f.adu.transaction == Some(tid) {
+                    PreCheckOutcome::Pass
+                } else {
+                    PreCheckOutcome::Fail(ModbusError::InvalidResponse)
+                }
+            }));
+            v.extend(checks);
+            v
+        } else {
+            checks
+        };
+
+        // Arm the waiter BEFORE the write — otherwise a fast slave's reply
+        // can arrive between write completion and `start(...)` and be
+        // dropped on the floor.
+        let rx = self.session.start(key, final_checks);
+        if let Err(err) = self.physical.write(&encoded).await {
+            self.session.stop(key);
+            return Err(err);
+        }
+
+        if broadcast {
+            // No response expected. Tear down the (unused) waiter we just
+            // armed for the FIFO key.
+            self.session.stop(key);
             return Ok(None);
         }
 
-        let rx = self.session.start_waiting(checks);
         let timeout = Duration::from_millis(timeout_ms);
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(frame))) => Ok(Some(frame)),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_)) => {
-                // Receiver dropped (e.g. session.stop_waiting elsewhere).
+                // Receiver dropped (e.g. session.stop_all elsewhere).
                 Err(ModbusError::InvalidState(
                     "master session was cleared while waiting".into(),
                 ))
             }
             Err(_) => {
-                self.session.stop_waiting();
+                self.session.stop(key);
                 Err(ModbusError::Timeout)
             }
         }
