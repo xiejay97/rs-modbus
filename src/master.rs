@@ -1,5 +1,5 @@
 use crate::error::ModbusError;
-use crate::layers::application::ApplicationLayer;
+use crate::layers::application::{ApplicationLayer, ApplicationRole};
 use crate::layers::physical::PhysicalLayer;
 use crate::types::{
     ApplicationDataUnit, DeviceIdentification, DeviceObject, FramedDataUnit, ServerId,
@@ -25,6 +25,12 @@ pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
 
 impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>, timeout_ms: u64) -> Self {
+        // Best-effort role binding. If it fails (already bound to Slave), the
+        // caller misused the layer; in that case the master will still operate
+        // but RTU/ASCII frame extraction may use the wrong direction. We
+        // expose role conflicts via `ApplicationLayer::set_role` returning
+        // `InvalidState`; we ignore it here because `new` is infallible.
+        let _ = application.set_role(ApplicationRole::Master);
         Self {
             application,
             physical,

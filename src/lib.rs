@@ -49,14 +49,13 @@
 //! use rs_modbus::layers::application::TcpApplicationLayer;
 //! use rs_modbus::layers::physical::TcpClientPhysicalLayer;
 //! use rs_modbus::master::ModbusMaster;
-//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let physical = TcpClientPhysicalLayer::new();
 //!     physical.set_addr("127.0.0.1:502".to_string()).await;
-//!     let application = TcpApplicationLayer::new();
-//!     let master = ModbusMaster::new(Arc::new(application), physical, 5000);
+//!     let application = TcpApplicationLayer::new(physical.clone());
+//!     let master = ModbusMaster::new(application, physical, 5000);
 //!
 //!     master.open().await?;
 //!     let res = master.read_holding_registers(1, 0, 10, None).await?;
@@ -75,9 +74,6 @@
 //! use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
 //! use rs_modbus::types::AddressRange;
 //! use async_trait::async_trait;
-//! use std::collections::HashMap;
-//! use std::sync::Arc;
-//! use tokio::sync::Mutex;
 //!
 //! struct SimpleModel;
 //!
@@ -88,7 +84,7 @@
 //!         AddressRange::default()
 //!     }
 //!     async fn read_holding_registers(
-//!         &self, address: u16, length: u16,
+//!         &self, _address: u16, length: u16,
 //!     ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
 //!         Ok(vec![0; length as usize])
 //!     }
@@ -98,8 +94,8 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let physical = TcpServerPhysicalLayer::new();
 //!     physical.set_addr("0.0.0.0:502".to_string()).await;
-//!     let application = TcpApplicationLayer::new();
-//!     let slave = ModbusSlave::new(Arc::new(application), physical);
+//!     let application = TcpApplicationLayer::new(physical.clone());
+//!     let slave = ModbusSlave::new(application, physical);
 //!
 //!     slave.add(Box::new(SimpleModel)).await;
 //!     slave.open().await?;

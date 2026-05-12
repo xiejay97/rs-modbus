@@ -159,8 +159,8 @@ async fn create_slave() -> (
 ) {
     let physical = TcpServerPhysicalLayer::new();
     physical.set_addr("127.0.0.1:0".to_string()).await;
-    let application = TcpApplicationLayer::new();
-    let slave = ModbusSlave::new(Arc::new(application), Arc::clone(&physical));
+    let application = TcpApplicationLayer::new(physical.clone());
+    let slave = ModbusSlave::new(application, Arc::clone(&physical));
 
     let coils = Arc::new(Mutex::new(HashMap::new()));
     let discrete_inputs = Arc::new(Mutex::new(HashMap::new()));
@@ -194,8 +194,8 @@ async fn create_master(
     let addr = server.get_addr().await.unwrap();
     let physical = TcpClientPhysicalLayer::new();
     physical.set_addr(addr).await;
-    let application = TcpApplicationLayer::new();
-    let master = ModbusMaster::new(Arc::new(application), physical, 1000);
+    let application = TcpApplicationLayer::new(physical.clone());
+    let master = ModbusMaster::new(application, physical, 1000);
     master.open().await.unwrap();
     master
 }

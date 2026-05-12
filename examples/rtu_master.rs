@@ -5,16 +5,14 @@ use rs_modbus::layers::application::RtuApplicationLayer;
 use rs_modbus::layers::physical::SerialPhysicalLayer;
 #[cfg(feature = "serial")]
 use rs_modbus::master::ModbusMaster;
-#[cfg(feature = "serial")]
-use std::sync::Arc;
 
 #[cfg(feature = "serial")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
     let physical = SerialPhysicalLayer::new("COM1".to_string(), 9600);
-    let application = RtuApplicationLayer::new();
-    let master = ModbusMaster::new(Arc::new(application), physical, 1000);
+    let application = RtuApplicationLayer::new(physical.clone(), Some(9600), None);
+    let master = ModbusMaster::new(application, physical, 1000);
 
     master.open().await?;
 

@@ -1,5 +1,5 @@
 use crate::error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
-use crate::layers::application::ApplicationLayer;
+use crate::layers::application::{ApplicationLayer, ApplicationRole};
 use crate::layers::physical::{PhysicalLayer, ResponseFn};
 use crate::types::{AddressRange, ApplicationDataUnit, FramedDataUnit, ServerId};
 use crate::utils::{check_range, pack_coils, pack_registers};
@@ -96,6 +96,7 @@ pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>) -> Self {
+        let _ = application.set_role(ApplicationRole::Slave);
         Self {
             application,
             physical,

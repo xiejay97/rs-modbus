@@ -46,6 +46,8 @@ pub enum ModbusError {
     ServerDeviceFailure,
     #[error("Connection error: {0}")]
     ConnectionError(String),
+    #[error("Invalid state: {0}")]
+    InvalidState(String),
     #[error("IO error: {0}")]
     Io(std::sync::Arc<std::io::Error>),
 }

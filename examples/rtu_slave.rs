@@ -111,8 +111,8 @@ impl ModbusSlaveModel for SimpleModel {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
     let physical = SerialPhysicalLayer::new("COM1".to_string(), 9600);
-    let application = RtuApplicationLayer::new();
-    let slave = ModbusSlave::new(Arc::new(application), physical);
+    let application = RtuApplicationLayer::new(physical.clone(), Some(9600), None);
+    let slave = ModbusSlave::new(application, physical);
 
     let model = SimpleModel::new();
     model.holding_registers.lock().await.insert(0, 0x1234);

@@ -3,7 +3,6 @@ use rs_modbus::layers::application::TcpApplicationLayer;
 use rs_modbus::layers::physical::TcpServerPhysicalLayer;
 use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
 use rs_modbus::types::AddressRange;
-use std::sync::Arc;
 
 /// A custom function code handler.
 ///
@@ -53,8 +52,8 @@ impl ModbusSlaveModel for CustomModel {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let physical = TcpServerPhysicalLayer::new();
     physical.set_addr("0.0.0.0:502".to_string()).await;
-    let application = TcpApplicationLayer::new();
-    let slave = ModbusSlave::new(Arc::new(application), physical);
+    let application = TcpApplicationLayer::new(physical.clone());
+    let slave = ModbusSlave::new(application, physical);
 
     slave.add(Box::new(CustomModel)).await;
     slave.open().await?;
