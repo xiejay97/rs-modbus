@@ -96,8 +96,8 @@ impl<A: ApplicationLayer, P: PhysicalLayer> ModbusMaster<A, P> {
 
         let result = tokio::time::timeout(timeout, async {
             loop {
-                let (received, _) = rx.recv().await.map_err(|_| ModbusError::Timeout)?;
-                let frame = self.application.decode(&received)?;
+                let event = rx.recv().await.map_err(|_| ModbusError::Timeout)?;
+                let frame = self.application.decode(&event.data)?;
 
                 let mut matched = true;
                 for check in &checks {

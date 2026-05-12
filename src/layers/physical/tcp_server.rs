@@ -1,42 +1,52 @@
 use crate::error::ModbusError;
-use crate::layers::physical::{PhysicalLayer, ResponseFn};
+use crate::layers::physical::{
+    ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
+};
+use crate::utils::gen_connection_id;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 
-use std::collections::HashMap;
-
 pub struct TcpServerPhysicalLayer {
     is_open: Arc<Mutex<bool>>,
     is_destroyed: Arc<Mutex<bool>>,
     pub(crate) addr: Arc<Mutex<Option<String>>>,
-    clients: Arc<Mutex<HashMap<u64, Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>>>>,
-    next_client_id: Arc<Mutex<u64>>,
-    data_tx: broadcast::Sender<(Vec<u8>, ResponseFn)>,
+    clients: Arc<Mutex<HashMap<ConnectionId, Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>>>>,
+    data_tx: broadcast::Sender<DataEvent>,
+    write_tx: broadcast::Sender<Vec<u8>>,
     error_tx: broadcast::Sender<ModbusError>,
+    connection_close_tx: broadcast::Sender<ConnectionId>,
     close_tx: broadcast::Sender<()>,
-    _data_rx: Mutex<broadcast::Receiver<(Vec<u8>, ResponseFn)>>,
+    _data_rx: Mutex<broadcast::Receiver<DataEvent>>,
+    _write_rx: Mutex<broadcast::Receiver<Vec<u8>>>,
     _error_rx: Mutex<broadcast::Receiver<ModbusError>>,
+    _connection_close_rx: Mutex<broadcast::Receiver<ConnectionId>>,
     _close_rx: Mutex<broadcast::Receiver<()>>,
 }
 
 impl TcpServerPhysicalLayer {
     pub fn new() -> Arc<Self> {
         let (data_tx, data_rx) = broadcast::channel(16);
+        let (write_tx, write_rx) = broadcast::channel(16);
         let (error_tx, error_rx) = broadcast::channel(16);
+        let (connection_close_tx, connection_close_rx) = broadcast::channel(16);
         let (close_tx, close_rx) = broadcast::channel(16);
         Arc::new(Self {
             is_open: Arc::new(Mutex::new(false)),
             is_destroyed: Arc::new(Mutex::new(false)),
             addr: Arc::new(Mutex::new(None)),
             clients: Arc::new(Mutex::new(HashMap::new())),
-            next_client_id: Arc::new(Mutex::new(0)),
             data_tx,
+            write_tx,
             error_tx,
+            connection_close_tx,
             close_tx,
             _data_rx: Mutex::new(data_rx),
+            _write_rx: Mutex::new(write_rx),
             _error_rx: Mutex::new(error_rx),
+            _connection_close_rx: Mutex::new(connection_close_rx),
             _close_rx: Mutex::new(close_rx),
         })
     }
@@ -52,6 +62,10 @@ impl TcpServerPhysicalLayer {
 
 #[async_trait::async_trait]
 impl PhysicalLayer for TcpServerPhysicalLayer {
+    fn layer_type(&self) -> PhysicalLayerType {
+        PhysicalLayerType::Net
+    }
+
     async fn open(&self) -> Result<(), ModbusError> {
         if *self.is_destroyed.lock().await {
             return Err(ModbusError::PortDestroyed);
@@ -70,10 +84,10 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
 
         let data_tx = self.data_tx.clone();
         let error_tx = self.error_tx.clone();
+        let connection_close_tx = self.connection_close_tx.clone();
         let close_tx = self.close_tx.clone();
         let is_open = Arc::clone(&self.is_open);
         let clients = Arc::clone(&self.clients);
-        let next_client_id = Arc::clone(&self.next_client_id);
 
         tokio::spawn(async move {
             loop {
@@ -81,19 +95,17 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
                     Ok((stream, _)) => {
                         let (mut read_half, write_half) = stream.into_split();
                         let write_half = Arc::new(Mutex::new(write_half));
-                        let client_id = {
-                            let mut id_guard = next_client_id.lock().await;
-                            let id = *id_guard;
-                            *id_guard += 1;
-                            id
-                        };
+                        let conn_id: ConnectionId =
+                            Arc::from(gen_connection_id("tcp-server"));
                         clients
                             .lock()
                             .await
-                            .insert(client_id, Arc::clone(&write_half));
+                            .insert(Arc::clone(&conn_id), Arc::clone(&write_half));
                         let data_tx = data_tx.clone();
                         let error_tx = error_tx.clone();
+                        let connection_close_tx = connection_close_tx.clone();
                         let clients = Arc::clone(&clients);
+                        let conn_id_for_task = Arc::clone(&conn_id);
 
                         tokio::spawn(async move {
                             let mut buf = vec![0u8; 1024];
@@ -114,7 +126,11 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
                                                     Ok(())
                                                 })
                                             });
-                                        let _ = data_tx.send((data, response));
+                                        let _ = data_tx.send(DataEvent {
+                                            data,
+                                            response,
+                                            connection: Arc::clone(&conn_id_for_task),
+                                        });
                                     }
                                     Err(e) => {
                                         let _ = error_tx
@@ -123,7 +139,8 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
                                     }
                                 }
                             }
-                            clients.lock().await.remove(&client_id);
+                            clients.lock().await.remove(&conn_id_for_task);
+                            let _ = connection_close_tx.send(conn_id_for_task);
                         });
                     }
                     Err(e) => {
@@ -146,9 +163,13 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
     async fn close(&self) -> Result<(), ModbusError> {
         *self.is_open.lock().await = false;
         let mut clients = self.clients.lock().await;
-        for (_, client) in clients.drain() {
+        let drained: Vec<(ConnectionId, _)> = clients.drain().collect();
+        drop(clients);
+        for (conn_id, client) in drained {
             let mut guard = client.lock().await;
             let _ = guard.shutdown().await;
+            drop(guard);
+            let _ = self.connection_close_tx.send(conn_id);
         }
         Ok(())
     }
@@ -174,12 +195,20 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
         }
     }
 
-    fn subscribe_data(&self) -> broadcast::Receiver<(Vec<u8>, ResponseFn)> {
+    fn subscribe_data(&self) -> broadcast::Receiver<DataEvent> {
         self.data_tx.subscribe()
+    }
+
+    fn subscribe_write(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.write_tx.subscribe()
     }
 
     fn subscribe_error(&self) -> broadcast::Receiver<ModbusError> {
         self.error_tx.subscribe()
+    }
+
+    fn subscribe_connection_close(&self) -> broadcast::Receiver<ConnectionId> {
+        self.connection_close_tx.subscribe()
     }
 
     fn subscribe_close(&self) -> broadcast::Receiver<()> {

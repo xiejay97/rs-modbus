@@ -133,9 +133,9 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let mut data_rx = self.physical.subscribe_data();
 
         tokio::spawn(async move {
-            while let Ok((data, response_fn)) = data_rx.recv().await {
-                if let Ok(frame) = application.decode(&data) {
-                    let _ = tx.send((frame, response_fn)).await;
+            while let Ok(event) = data_rx.recv().await {
+                if let Ok(frame) = application.decode(&event.data) {
+                    let _ = tx.send((frame, event.response)).await;
                 }
             }
         });

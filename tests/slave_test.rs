@@ -284,7 +284,7 @@ async fn test_fc5_write_single_coil() {
         .await
         .unwrap();
     assert_eq!(res, Some(true));
-    assert_eq!(*coils.lock().await.get(&40).unwrap(), true);
+    assert!(*coils.lock().await.get(&40).unwrap());
 
     master.destroy().await;
     slave.destroy().await;
@@ -318,10 +318,10 @@ async fn test_fc15_write_multiple_coils() {
     assert_eq!(res, Some(vec![true, false, true, true]));
 
     let guard = coils.lock().await;
-    assert_eq!(*guard.get(&60).unwrap(), true);
-    assert_eq!(*guard.get(&61).unwrap(), false);
-    assert_eq!(*guard.get(&62).unwrap(), true);
-    assert_eq!(*guard.get(&63).unwrap(), true);
+    assert!(*guard.get(&60).unwrap());
+    assert!(!*guard.get(&61).unwrap());
+    assert!(*guard.get(&62).unwrap());
+    assert!(*guard.get(&63).unwrap());
 
     master.destroy().await;
     slave.destroy().await;
@@ -374,7 +374,9 @@ async fn test_fc22_mask_write_register() {
         .unwrap();
     assert_eq!(res, Some((0b00001111, 0b10101010)));
 
-    let expected = (0b11110000 & 0b00001111) | (0b10101010 & !0b00001111);
+    #[allow(clippy::identity_op)]
+    let expected =
+        (0b11110000u16 & 0b00001111u16) | (0b10101010u16 & !0b00001111u16);
     assert_eq!(*holding_registers.lock().await.get(&80).unwrap(), expected);
 
     master.destroy().await;

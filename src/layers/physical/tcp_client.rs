@@ -1,5 +1,8 @@
 use crate::error::ModbusError;
-use crate::layers::physical::{PhysicalLayer, ResponseFn};
+use crate::layers::physical::{
+    ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
+};
+use crate::utils::gen_connection_id;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -10,29 +13,41 @@ pub struct TcpClientPhysicalLayer {
     is_open: Arc<Mutex<bool>>,
     is_destroyed: Arc<Mutex<bool>>,
     pub(crate) addr: Arc<Mutex<Option<String>>>,
-    data_tx: broadcast::Sender<(Vec<u8>, ResponseFn)>,
+    connection_id: Arc<Mutex<Option<ConnectionId>>>,
+    data_tx: broadcast::Sender<DataEvent>,
+    write_tx: broadcast::Sender<Vec<u8>>,
     error_tx: broadcast::Sender<ModbusError>,
+    connection_close_tx: broadcast::Sender<ConnectionId>,
     close_tx: broadcast::Sender<()>,
-    _data_rx: Mutex<broadcast::Receiver<(Vec<u8>, ResponseFn)>>,
+    _data_rx: Mutex<broadcast::Receiver<DataEvent>>,
+    _write_rx: Mutex<broadcast::Receiver<Vec<u8>>>,
     _error_rx: Mutex<broadcast::Receiver<ModbusError>>,
+    _connection_close_rx: Mutex<broadcast::Receiver<ConnectionId>>,
     _close_rx: Mutex<broadcast::Receiver<()>>,
 }
 
 impl TcpClientPhysicalLayer {
     pub fn new() -> Arc<Self> {
         let (data_tx, data_rx) = broadcast::channel(16);
+        let (write_tx, write_rx) = broadcast::channel(16);
         let (error_tx, error_rx) = broadcast::channel(16);
+        let (connection_close_tx, connection_close_rx) = broadcast::channel(16);
         let (close_tx, close_rx) = broadcast::channel(16);
         Arc::new(Self {
             write_half: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
             is_destroyed: Arc::new(Mutex::new(false)),
             addr: Arc::new(Mutex::new(None)),
+            connection_id: Arc::new(Mutex::new(None)),
             data_tx,
+            write_tx,
             error_tx,
+            connection_close_tx,
             close_tx,
             _data_rx: Mutex::new(data_rx),
+            _write_rx: Mutex::new(write_rx),
             _error_rx: Mutex::new(error_rx),
+            _connection_close_rx: Mutex::new(connection_close_rx),
             _close_rx: Mutex::new(close_rx),
         })
     }
@@ -42,28 +57,12 @@ impl TcpClientPhysicalLayer {
     }
 }
 
-impl Default for TcpClientPhysicalLayer {
-    fn default() -> Self {
-        let (data_tx, data_rx) = broadcast::channel(16);
-        let (error_tx, error_rx) = broadcast::channel(16);
-        let (close_tx, close_rx) = broadcast::channel(16);
-        Self {
-            write_half: Arc::new(Mutex::new(None)),
-            is_open: Arc::new(Mutex::new(false)),
-            is_destroyed: Arc::new(Mutex::new(false)),
-            addr: Arc::new(Mutex::new(None)),
-            data_tx,
-            error_tx,
-            close_tx,
-            _data_rx: Mutex::new(data_rx),
-            _error_rx: Mutex::new(error_rx),
-            _close_rx: Mutex::new(close_rx),
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl PhysicalLayer for TcpClientPhysicalLayer {
+    fn layer_type(&self) -> PhysicalLayerType {
+        PhysicalLayerType::Net
+    }
+
     async fn open(&self) -> Result<(), ModbusError> {
         if *self.is_destroyed.lock().await {
             return Err(ModbusError::PortDestroyed);
@@ -81,8 +80,12 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         *self.write_half.lock().await = Some(write_half);
         *self.is_open.lock().await = true;
 
+        let conn_id: ConnectionId = Arc::from(gen_connection_id("tcp-client"));
+        *self.connection_id.lock().await = Some(Arc::clone(&conn_id));
+
         let data_tx = self.data_tx.clone();
         let error_tx = self.error_tx.clone();
+        let connection_close_tx = self.connection_close_tx.clone();
         let close_tx = self.close_tx.clone();
         let is_open = Arc::clone(&self.is_open);
         let write_half = Arc::clone(&self.write_half);
@@ -107,7 +110,11 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
                                 Ok(())
                             })
                         });
-                        let _ = data_tx.send((data, response));
+                        let _ = data_tx.send(DataEvent {
+                            data,
+                            response,
+                            connection: Arc::clone(&conn_id),
+                        });
                     }
                     Err(e) => {
                         let _ = error_tx.send(ModbusError::ConnectionError(e.to_string()));
@@ -116,6 +123,7 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
                 }
             }
             *is_open.lock().await = false;
+            let _ = connection_close_tx.send(conn_id);
             let _ = close_tx.send(());
         });
 
@@ -130,6 +138,7 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
             w.write_all(data)
                 .await
                 .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
+            let _ = self.write_tx.send(data.to_vec());
             Ok(())
         } else {
             Err(ModbusError::PortNotOpen)
@@ -163,12 +172,20 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         }
     }
 
-    fn subscribe_data(&self) -> broadcast::Receiver<(Vec<u8>, ResponseFn)> {
+    fn subscribe_data(&self) -> broadcast::Receiver<DataEvent> {
         self.data_tx.subscribe()
+    }
+
+    fn subscribe_write(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.write_tx.subscribe()
     }
 
     fn subscribe_error(&self) -> broadcast::Receiver<ModbusError> {
         self.error_tx.subscribe()
+    }
+
+    fn subscribe_connection_close(&self) -> broadcast::Receiver<ConnectionId> {
+        self.connection_close_tx.subscribe()
     }
 
     fn subscribe_close(&self) -> broadcast::Receiver<()> {

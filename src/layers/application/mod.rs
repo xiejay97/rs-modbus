@@ -1,5 +1,28 @@
 use crate::error::ModbusError;
+use crate::layers::physical::{ConnectionId, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
+
+/// Application-layer role. Set by [`ModbusMaster`] / [`ModbusSlave`] when they
+/// take ownership of an application layer.
+///
+/// RTU framing differentiates request vs response by role (request and
+/// response of the same FC may have different lengths).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplicationRole {
+    Master,
+    Slave,
+}
+
+/// A successfully framed PDU emitted by an [`ApplicationLayer`] via
+/// `subscribe_framing`. Carries the parsed ADU, the raw bytes that produced it,
+/// the per-message reply closure, and the connection it came from.
+#[derive(Clone)]
+pub struct Framing {
+    pub adu: ApplicationDataUnit,
+    pub raw: Vec<u8>,
+    pub response: ResponseFn,
+    pub connection: ConnectionId,
+}
 
 pub trait ApplicationLayer: Send + Sync {
     fn encode(&self, adu: &ApplicationDataUnit) -> Vec<u8>;
@@ -17,6 +40,34 @@ pub use tcp::TcpApplicationLayer;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ===== Base types =====
+
+    #[test]
+    fn test_application_role_equality() {
+        assert_eq!(ApplicationRole::Master, ApplicationRole::Master);
+        assert_ne!(ApplicationRole::Master, ApplicationRole::Slave);
+    }
+
+    #[test]
+    fn test_framing_clone_preserves_fields() {
+        use crate::layers::physical::{ConnectionId, ResponseFn};
+        use std::sync::Arc;
+
+        let response: ResponseFn = Arc::new(|_| Box::pin(async { Ok(()) }));
+        let conn: ConnectionId = Arc::from("test");
+        let framing = Framing {
+            adu: ApplicationDataUnit::new(1, 0x03, vec![0x00, 0x0a]),
+            raw: vec![0xff; 4],
+            response,
+            connection: conn,
+        };
+        let cloned = framing.clone();
+        assert_eq!(cloned.adu.unit, 1);
+        assert_eq!(cloned.adu.fc, 0x03);
+        assert_eq!(cloned.raw, vec![0xff; 4]);
+        assert_eq!(&*cloned.connection, "test");
+    }
 
     #[test]
     fn test_tcp_encode() {

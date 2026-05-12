@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 const CRC_TABLE: [u16; 256] = [
     0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241, 0xc601, 0x06c0, 0x0780, 0xc741,
     0x0500, 0xc5c1, 0xc481, 0x0440, 0xcc01, 0x0cc0, 0x0d80, 0xcd41, 0x0f00, 0xcfc1, 0xce81, 0x0e40,
@@ -104,6 +107,77 @@ pub fn parse_registers(data: &[u8], length: u16) -> Vec<u16> {
         result.push(u16::from_be_bytes([data[idx], data[idx + 1]]));
     }
     result
+}
+
+/// Predict the total RTU frame length (PDU + 2-byte CRC) given the leading bytes.
+///
+/// Returns `None` when:
+/// - The buffer is too short to identify the function code or read a byteCount.
+/// - The function code is unknown or has a variable-length response that cannot
+///   be predicted from leading bytes (FC 43/14 responses).
+///
+/// Callers must fall back to a sliding-window CRC scan when `None` is returned.
+pub fn predict_rtu_frame_length(buffer: &[u8], is_response: bool) -> Option<usize> {
+    if buffer.len() < 2 {
+        return None;
+    }
+    let fc = buffer[1];
+
+    if is_response && (fc & 0x80) != 0 {
+        return Some(5);
+    }
+
+    let fixed = if is_response {
+        match fc {
+            0x05 | 0x06 | 0x0f | 0x10 => Some(8usize),
+            0x16 => Some(10),
+            _ => None,
+        }
+    } else {
+        match fc {
+            0x01..=0x06 => Some(8usize),
+            0x11 => Some(4),
+            0x16 => Some(10),
+            0x2b => Some(7),
+            _ => None,
+        }
+    };
+    if let Some(n) = fixed {
+        return Some(n);
+    }
+
+    let (offset, extra) = if is_response {
+        match fc {
+            0x01 | 0x02 | 0x03 | 0x04 | 0x11 | 0x17 => (2usize, 5usize),
+            _ => return None,
+        }
+    } else {
+        match fc {
+            0x0f | 0x10 => (6usize, 9usize),
+            0x17 => (10, 13),
+            _ => return None,
+        }
+    };
+    if buffer.len() <= offset {
+        return None;
+    }
+    Some(extra + buffer[offset] as usize)
+}
+
+static CONNECTION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a process-unique connection id with the given prefix.
+///
+/// Format: `{prefix}-{nanos_since_epoch}-{seq}` where seq is a monotonically
+/// increasing per-process counter. Used by physical layer implementations to
+/// identify individual sockets / serial ports.
+pub fn gen_connection_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = CONNECTION_ID_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    format!("{prefix}-{nanos}-{seq}")
 }
 
 #[cfg(test)]
@@ -226,5 +300,168 @@ mod tests {
         let packed = pack_registers(&regs, 3);
         let parsed = parse_registers(&packed, 3);
         assert_eq!(regs, parsed);
+    }
+
+    // ===== predict_rtu_frame_length =====
+
+    #[test]
+    fn test_predict_buffer_too_short_returns_none() {
+        assert_eq!(predict_rtu_frame_length(&[], false), None);
+        assert_eq!(predict_rtu_frame_length(&[0x01], false), None);
+    }
+
+    #[test]
+    fn test_predict_request_fc1_2_3_4_5_6_fixed_8() {
+        for fc in [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06] {
+            assert_eq!(
+                predict_rtu_frame_length(&[0x01, fc], false),
+                Some(8),
+                "request fc=0x{:02x} should predict 8",
+                fc
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_request_fc17_fixed_4() {
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x11], false), Some(4));
+    }
+
+    #[test]
+    fn test_predict_request_fc22_fixed_10() {
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x16], false), Some(10));
+    }
+
+    #[test]
+    fn test_predict_request_fc43_fixed_7() {
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x2b], false), Some(7));
+    }
+
+    #[test]
+    fn test_predict_request_fc15_byte_count() {
+        // fc=0x0f request: offset=6 (byteCount), extra=9
+        // bytes: unit fc addr1 addr2 qty1 qty2 byteCount ... + 2 CRC = 9 + byteCount
+        let buf = [0x01u8, 0x0f, 0x00, 0x00, 0x00, 0x0a, 0x02];
+        assert_eq!(predict_rtu_frame_length(&buf, false), Some(11));
+    }
+
+    #[test]
+    fn test_predict_request_fc16_byte_count() {
+        // fc=0x10 request: offset=6, extra=9
+        let buf = [0x01u8, 0x10, 0x00, 0x00, 0x00, 0x02, 0x04];
+        assert_eq!(predict_rtu_frame_length(&buf, false), Some(13));
+    }
+
+    #[test]
+    fn test_predict_request_fc23_byte_count() {
+        // fc=0x17 request: offset=10, extra=13
+        let buf = [
+            0x01u8, 0x17, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x01, 0x02,
+        ];
+        assert_eq!(predict_rtu_frame_length(&buf, false), Some(15));
+    }
+
+    #[test]
+    fn test_predict_request_byte_count_buffer_too_short() {
+        // fc=0x0f offset=6, buffer length=6 → cannot read byteCount
+        let buf = [0x01u8, 0x0f, 0x00, 0x00, 0x00, 0x0a];
+        assert_eq!(predict_rtu_frame_length(&buf, false), None);
+    }
+
+    #[test]
+    fn test_predict_response_exception_returns_5() {
+        // Any response with fc & 0x80 = exception, length is 5 (unit + fc + code + crc[2])
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x83], true), Some(5));
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x90], true), Some(5));
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0xab], true), Some(5));
+    }
+
+    #[test]
+    fn test_predict_response_fc5_6_15_16_fixed_8() {
+        for fc in [0x05u8, 0x06, 0x0f, 0x10] {
+            assert_eq!(
+                predict_rtu_frame_length(&[0x01, fc], true),
+                Some(8),
+                "response fc=0x{:02x} should predict 8",
+                fc
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_response_fc22_fixed_10() {
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x16], true), Some(10));
+    }
+
+    #[test]
+    fn test_predict_response_fc1_2_3_4_byte_count() {
+        // response offset=2, extra=5
+        // unit fc byteCount data... crc[2] = 5 + byteCount
+        for fc in [0x01u8, 0x02, 0x03, 0x04] {
+            let buf = [0x01u8, fc, 0x04, 0x00, 0x00, 0x00, 0x00];
+            assert_eq!(
+                predict_rtu_frame_length(&buf, true),
+                Some(9),
+                "response fc=0x{:02x} byte_count=4 should predict 9",
+                fc
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_response_fc17_byte_count() {
+        let buf = [0x01u8, 0x11, 0x03];
+        assert_eq!(predict_rtu_frame_length(&buf, true), Some(8));
+    }
+
+    #[test]
+    fn test_predict_response_fc23_byte_count() {
+        let buf = [0x01u8, 0x17, 0x04];
+        assert_eq!(predict_rtu_frame_length(&buf, true), Some(9));
+    }
+
+    #[test]
+    fn test_predict_response_byte_count_buffer_too_short() {
+        // response fc=0x03 offset=2, buffer length=2 → no byteCount yet
+        let buf = [0x01u8, 0x03];
+        assert_eq!(predict_rtu_frame_length(&buf, true), None);
+    }
+
+    #[test]
+    fn test_predict_unknown_fc_returns_none() {
+        // Unknown function codes should return None (caller falls back to sliding scan)
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x99], false), None);
+        // FC43 response is variable-length and not predictable from leading bytes
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x2b], true), None);
+    }
+
+    #[test]
+    fn test_predict_request_exception_path_not_taken() {
+        // In a request, fc with high bit set is NOT treated as exception
+        // (only responses use that path)
+        assert_eq!(predict_rtu_frame_length(&[0x01, 0x83], false), None);
+    }
+
+    // ===== gen_connection_id =====
+
+    #[test]
+    fn test_gen_connection_id_has_prefix() {
+        let id = gen_connection_id("serial");
+        assert!(id.starts_with("serial-"), "got {}", id);
+    }
+
+    #[test]
+    fn test_gen_connection_id_is_unique() {
+        let a = gen_connection_id("tcp-server");
+        let b = gen_connection_id("tcp-server");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_gen_connection_id_different_prefixes() {
+        let a = gen_connection_id("a");
+        let b = gen_connection_id("b");
+        assert!(a.starts_with("a-"));
+        assert!(b.starts_with("b-"));
     }
 }
