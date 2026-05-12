@@ -921,7 +921,10 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                 }
 
                 let max_id = objects.last().map(|(id, _)| *id).unwrap_or(0);
-                let conformity_level = if max_id > 0x80 {
+                // Per Modbus V1.1b3 §6.21, Extended range is 0x80..=0xFF
+                // (inclusive at 0x80). Off-by-one here meant an Extended
+                // object at exactly 0x80 was under-reported as 0x82.
+                let conformity_level = if max_id >= 0x80 {
                     0x83
                 } else if max_id > 0x02 {
                     0x82
