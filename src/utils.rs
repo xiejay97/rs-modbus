@@ -27,7 +27,14 @@ const CRC_TABLE: [u16; 256] = [
 ];
 
 pub fn crc(data: &[u8]) -> u16 {
-    let mut crc = 0xffffu16;
+    crc_with_seed(data, 0xffff)
+}
+
+/// Update an in-progress CRC by feeding `data`. Pass `0xffff` for a fresh
+/// computation, or the previous result to extend a running CRC by additional
+/// bytes (mirrors njs-modbus `crc(data, seed)`).
+pub fn crc_with_seed(data: &[u8], seed: u16) -> u16 {
+    let mut crc = seed;
     for &byte in data {
         crc = CRC_TABLE[((crc ^ byte as u16) & 0xff) as usize] ^ (crc >> 8);
     }
@@ -197,6 +204,22 @@ mod tests {
         let mut full_frame = data.to_vec();
         full_frame.extend_from_slice(&frame_crc);
         assert_eq!(crc(&full_frame[..full_frame.len() - 2]), result);
+    }
+
+    #[test]
+    fn test_crc_with_seed_chains_equivalently() {
+        // Splitting `crc(a ++ b)` into `crc_with_seed(b, crc(a))` must yield
+        // the identical result — this is the invariant the sliding-window
+        // running CRC in rtu.rs relies on.
+        let data = [0x01u8, 0x03, 0x00, 0x00, 0x00, 0x0a, 0x77, 0xff];
+        let full = crc(&data);
+        for split in 0..=data.len() {
+            let (left, right) = data.split_at(split);
+            let chained = crc_with_seed(right, crc(left));
+            assert_eq!(chained, full, "split={split}");
+        }
+        // crc() must equal crc_with_seed(.., 0xffff).
+        assert_eq!(crc(&data), crc_with_seed(&data, 0xffff));
     }
 
     #[test]

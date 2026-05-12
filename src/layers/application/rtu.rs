@@ -2,7 +2,7 @@ use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
-use crate::utils::{crc, predict_rtu_frame_length};
+use crate::utils::{crc, crc_with_seed, predict_rtu_frame_length};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -232,19 +232,37 @@ fn try_extract(buffer: &[u8], is_response: bool) -> ExtractResult {
 }
 
 fn sliding_extract(buffer: &[u8]) -> ExtractResult {
-    let max_len = buffer.len().min(MAX_FRAME_LENGTH);
-    for len in MIN_FRAME_LENGTH..=max_len {
-        if crc_matches(buffer, len) {
-            return ExtractResult::Frame {
-                skip: 0,
-                frame_len: len,
-            };
+    let last_start = buffer.len().saturating_sub(MIN_FRAME_LENGTH);
+    for start in 0..=last_start {
+        let remaining = &buffer[start..];
+        let max_len = remaining.len().min(MAX_FRAME_LENGTH);
+        // Running CRC over remaining[..len - 2]; advances by one byte per
+        // length increment so the inner loop is O(max_len) instead of
+        // O(max_len^2). Matches njs-modbus slidingExtract's runningCrc.
+        let mut running_crc = crc(&remaining[..MIN_FRAME_LENGTH - 2]);
+        for len in MIN_FRAME_LENGTH..=max_len {
+            let frame_crc = u16::from_le_bytes([remaining[len - 2], remaining[len - 1]]);
+            if frame_crc == running_crc {
+                return ExtractResult::Frame {
+                    skip: start,
+                    frame_len: len,
+                };
+            }
+            if len < max_len {
+                running_crc = crc_with_seed(&remaining[len - 2..len - 1], running_crc);
+            }
         }
     }
-    // No frame starts at offset 0 (predict already failed too). Drop one byte
-    // so the next try_extract sees a fresh leading FC. Bounded per-byte work
-    // even under garbage input (the prior outer-start loop was O(N^2)).
-    ExtractResult::Skip
+    // No frame found at any offset. If buffer hasn't reached MAX_FRAME_LENGTH
+    // yet, wait for more data — an unpredictable-FC response (e.g. FC 43/14)
+    // may still be arriving in fragments. Once buffer fills, dropping one
+    // byte is the only way to make progress, bounding steady-state buffering
+    // at ~MAX_FRAME_LENGTH per connection. Mirrors njs-modbus slidingExtract.
+    if buffer.len() >= MAX_FRAME_LENGTH {
+        ExtractResult::Skip
+    } else {
+        ExtractResult::Insufficient
+    }
 }
 
 fn crc_matches(buffer: &[u8], length: usize) -> bool {
@@ -404,5 +422,66 @@ mod tests {
     #[test]
     fn test_compute_interval_ms_serial_default_baud_when_unspecified() {
         assert_eq!(compute_interval_ms(PhysicalLayerType::Serial, None, None), 5);
+    }
+
+    // ===== sliding_extract =====
+
+    #[test]
+    fn test_sliding_extract_waits_when_under_max_and_no_match() {
+        // Unpredictable-FC frame still in transit — predict returned None
+        // and the partial bytes don't form a valid CRC at any length yet.
+        // Must NOT drop bytes; wait for more data so e.g. a fragmented
+        // FC 43/14 response on TCP-RTU can be reassembled.
+        let buffer = vec![0xaa; 100];
+        assert!(matches!(
+            sliding_extract(&buffer),
+            ExtractResult::Insufficient
+        ));
+    }
+
+    #[test]
+    fn test_sliding_extract_skips_when_at_max_and_no_match() {
+        // Once buffer reaches MAX_FRAME_LENGTH bytes with no valid CRC,
+        // dropping one byte is the only way to make progress. This bounds
+        // steady-state buffering at ~MAX_FRAME_LENGTH per connection.
+        let buffer = vec![0xaa; MAX_FRAME_LENGTH];
+        assert!(matches!(sliding_extract(&buffer), ExtractResult::Skip));
+    }
+
+    #[test]
+    fn test_sliding_extract_returns_frame_at_offset_0() {
+        // Unpredictable-FC frame (e.g. FC 43 response) sitting at offset 0.
+        let mut frame = vec![0x01u8, 0x2b, 0x0e];
+        let c = crate::utils::crc(&frame);
+        frame.extend_from_slice(&c.to_le_bytes());
+        match sliding_extract(&frame) {
+            ExtractResult::Frame { skip, frame_len } => {
+                assert_eq!(skip, 0);
+                assert_eq!(frame_len, 5);
+            }
+            _ => panic!("expected Frame"),
+        }
+    }
+
+    #[test]
+    fn test_sliding_extract_finds_frame_at_later_offset() {
+        // sliding_extract scans every starting offset (matching njs-modbus
+        // slidingExtract). A valid frame buried after some prefix junk is
+        // found in one call, with `skip` indicating how many leading bytes
+        // to drop. This is the common recovery path for serial noise / TCP
+        // segment seams in industrial deployments.
+        let mut frame = vec![0x01u8, 0x2b, 0x0e];
+        let c = crate::utils::crc(&frame);
+        frame.extend_from_slice(&c.to_le_bytes());
+        // Prepend 3 bytes of junk so the valid frame starts at offset 3.
+        let mut buffer = vec![0xffu8, 0x00, 0xfe];
+        buffer.extend_from_slice(&frame);
+        match sliding_extract(&buffer) {
+            ExtractResult::Frame { skip, frame_len } => {
+                assert_eq!(skip, 3);
+                assert_eq!(frame_len, 5);
+            }
+            _ => panic!("expected Frame at skip=3"),
+        }
     }
 }
