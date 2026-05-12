@@ -313,8 +313,7 @@ mod tests {
     #[tokio::test]
     async fn test_pre_check_fail_returns_error() {
         let session = MasterSession::new();
-        let fail: PreCheck =
-            Arc::new(|_| PreCheckOutcome::Fail(ModbusError::IllegalDataAddress));
+        let fail: PreCheck = Arc::new(|_| PreCheckOutcome::Fail(ModbusError::IllegalDataAddress));
         let rx = session.start(WaiterKey::Fifo, vec![fail]);
         session.handle_frame(fake_framing(1, 0x03, vec![]));
         assert!(matches!(

@@ -382,8 +382,7 @@ async fn test_fc22_mask_write_register() {
     assert_eq!(res, Some((0b00001111, 0b10101010)));
 
     #[allow(clippy::identity_op)]
-    let expected =
-        (0b11110000u16 & 0b00001111u16) | (0b10101010u16 & !0b00001111u16);
+    let expected = (0b11110000u16 & 0b00001111u16) | (0b10101010u16 & !0b00001111u16);
     assert_eq!(*holding_registers.lock().await.get(&80).unwrap(), expected);
 
     master.destroy().await;

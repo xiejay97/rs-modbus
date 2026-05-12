@@ -2,9 +2,7 @@
 //! TCP loopback and assert the right frames / errors come out.
 
 use rs_modbus::layers::application::{ApplicationLayer, AsciiApplicationLayer};
-use rs_modbus::layers::physical::{
-    PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer,
-};
+use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::utils::lrc;
 use std::sync::Arc;
 use std::time::Duration;

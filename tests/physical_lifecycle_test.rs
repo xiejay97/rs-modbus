@@ -121,7 +121,10 @@ async fn tcp_client_rejects_open_and_write_after_destroy() {
     phy.open().await.unwrap();
     phy.destroy().await;
     assert!(matches!(phy.open().await, Err(ModbusError::PortDestroyed)));
-    assert!(matches!(phy.write(&[0]).await, Err(ModbusError::PortNotOpen)));
+    assert!(matches!(
+        phy.write(&[0]).await,
+        Err(ModbusError::PortNotOpen)
+    ));
 }
 
 // ===== TcpServerPhysicalLayer — lifecycle =====

@@ -13,9 +13,7 @@
 use rs_modbus::layers::application::{
     ApplicationLayer, ApplicationRole, FrameInterval, RtuApplicationLayer,
 };
-use rs_modbus::layers::physical::{
-    PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer,
-};
+use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::utils::crc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -176,7 +174,8 @@ async fn test_rtu_compute_interval_ms_via_constructor_net() {
     // The `interval_ms` field is private; we exercise it via constructor not
     // panicking with various inputs.
     let _ = app;
-    let app2 = RtuApplicationLayer::new(physical.clone(), Some(9600), Some(FrameInterval::Bits(96)));
+    let app2 =
+        RtuApplicationLayer::new(physical.clone(), Some(9600), Some(FrameInterval::Bits(96)));
     let _ = app2;
     let app3 = RtuApplicationLayer::new(physical, Some(115200), Some(FrameInterval::Ms(7)));
     let _ = app3;

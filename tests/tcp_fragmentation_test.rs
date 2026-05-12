@@ -5,9 +5,7 @@
 //! and absurd length-field handling.
 
 use rs_modbus::layers::application::{ApplicationLayer, TcpApplicationLayer};
-use rs_modbus::layers::physical::{
-    PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer,
-};
+use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -24,7 +22,11 @@ fn mbap_request(transaction: u16, unit: u8, fc: u8, data: &[u8]) -> Vec<u8> {
     buf
 }
 
-async fn setup_server() -> (Arc<TcpServerPhysicalLayer>, Arc<TcpApplicationLayer>, String) {
+async fn setup_server() -> (
+    Arc<TcpServerPhysicalLayer>,
+    Arc<TcpApplicationLayer>,
+    String,
+) {
     let physical = TcpServerPhysicalLayer::new();
     physical.set_addr("127.0.0.1:0".to_string()).await;
     physical.open().await.unwrap();
@@ -232,8 +234,7 @@ async fn test_rejects_invalid_protocol_id() {
     client.write(&good).await.unwrap();
     // Either a valid framing comes (with transaction 301) or no framing
     // arrives (connection dropped). What MUST NOT happen is `Some(300)`.
-    if let Ok(Ok(frame)) =
-        tokio::time::timeout(Duration::from_millis(500), framing_rx.recv()).await
+    if let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_millis(500), framing_rx.recv()).await
     {
         assert_eq!(frame.adu.transaction, Some(301));
     }

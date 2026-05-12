@@ -52,11 +52,8 @@ impl RtuApplicationLayer {
         baud_rate: Option<u32>,
         interval_between_frames: Option<FrameInterval>,
     ) -> Arc<Self> {
-        let interval_ms = compute_interval_ms(
-            physical.layer_type(),
-            baud_rate,
-            interval_between_frames,
-        );
+        let interval_ms =
+            compute_interval_ms(physical.layer_type(), baud_rate, interval_between_frames);
 
         let (framing_tx, _) = broadcast::channel(64);
         let (framing_error_tx, _) = broadcast::channel(64);
@@ -365,7 +362,11 @@ mod tests {
     fn test_compute_interval_ms_net_returns_zero() {
         assert_eq!(compute_interval_ms(PhysicalLayerType::Net, None, None), 0);
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Net, Some(9600), Some(FrameInterval::Ms(50))),
+            compute_interval_ms(
+                PhysicalLayerType::Net,
+                Some(9600),
+                Some(FrameInterval::Ms(50))
+            ),
             0,
             "Net always ignores baud/interval inputs"
         );
@@ -425,7 +426,10 @@ mod tests {
 
     #[test]
     fn test_compute_interval_ms_serial_default_baud_when_unspecified() {
-        assert_eq!(compute_interval_ms(PhysicalLayerType::Serial, None, None), 5);
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Serial, None, None),
+            5
+        );
     }
 
     // ===== sliding_extract =====

@@ -183,7 +183,9 @@ pub fn gen_connection_id(prefix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let seq = CONNECTION_ID_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let seq = CONNECTION_ID_SEQ
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
     format!("{prefix}-{nanos}-{seq}")
 }
 
