@@ -1,11 +1,15 @@
 use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
-use crate::layers::physical::PhysicalLayer;
+use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
-use crate::utils::crc;
+use crate::utils::{crc, predict_rtu_frame_length};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+
+const MAX_FRAME_LENGTH: usize = 256;
+const MIN_FRAME_LENGTH: usize = 4;
 
 /// Inter-frame timing for RTU. Mirrors njs-modbus
 /// `intervalBetweenFrames?: { unit: 'bit' | 'ms'; value: number }`.
@@ -18,15 +22,16 @@ pub enum FrameInterval {
 }
 
 pub struct RtuApplicationLayer {
-    role: Mutex<Option<ApplicationRole>>,
+    role: Arc<Mutex<Option<ApplicationRole>>>,
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
+    buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
     _framing_rx: Mutex<broadcast::Receiver<Framing>>,
     _framing_error_rx: Mutex<broadcast::Receiver<ModbusError>>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Computed millisecond timeout for the 3.5T inter-frame gap. `0` on Net
-    /// transports (no inter-frame timer; treat each `DataEvent` as one frame).
-    /// Used by the stateful framing logic introduced in a later commit.
+    /// transports. Currently unused at runtime (frame extraction is purely
+    /// driven by data arrival and CRC), kept for future timer-based flush.
     #[allow(dead_code)]
     interval_ms: u32,
 }
@@ -41,8 +46,8 @@ impl RtuApplicationLayer {
     /// `interval_between_frames` overrides the default 3.5T computation:
     /// - `Some(FrameInterval::Ms(n))` — use `n` ms directly.
     /// - `Some(FrameInterval::Bits(n))` — use `n` bit-times instead of 48.
-    /// - `None` on serial: 1.8 ms when `baud_rate > 19200`, else
-    ///   `(48 * 1000) / baud_rate` rounded up.
+    /// - `None` on serial: 2 ms when `baud_rate > 19200`, else
+    ///   `ceil((48 * 1000) / baud_rate)`.
     /// - `None` on net: 0 (flush every chunk immediately).
     pub fn new<P: PhysicalLayer + 'static>(
         physical: Arc<P>,
@@ -57,46 +62,60 @@ impl RtuApplicationLayer {
 
         let (framing_tx, framing_rx) = broadcast::channel(64);
         let (framing_error_tx, framing_error_rx) = broadcast::channel(64);
+        let buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let role: Arc<Mutex<Option<ApplicationRole>>> = Arc::new(Mutex::new(None));
         let app = Arc::new(Self {
-            role: Mutex::new(None),
+            role: Arc::clone(&role),
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
+            buffers: Arc::clone(&buffers),
             _framing_rx: Mutex::new(framing_rx),
             _framing_error_rx: Mutex::new(framing_error_rx),
-            task: Mutex::new(None),
+            tasks: Mutex::new(Vec::new()),
             interval_ms,
         });
 
+        // Data ingestion task.
         let mut data_rx = physical.subscribe_data();
-        let task = tokio::spawn(async move {
+        let buffers_for_data = Arc::clone(&buffers);
+        let framing_tx_for_data = framing_tx.clone();
+        let framing_error_tx_for_data = framing_error_tx.clone();
+        let role_for_data = Arc::clone(&role);
+        let data_task = tokio::spawn(async move {
             while let Ok(event) = data_rx.recv().await {
-                match decode_frame(&event.data) {
-                    Ok(adu) => {
-                        let _ = framing_tx.send(Framing {
-                            adu,
-                            raw: event.data,
-                            response: event.response,
-                            connection: event.connection,
-                        });
-                    }
-                    Err(err) => {
-                        let _ = framing_error_tx.send(err);
-                    }
-                }
+                let role_snapshot = *role_for_data.lock().unwrap();
+                process_data_event(
+                    &buffers_for_data,
+                    &framing_tx_for_data,
+                    &framing_error_tx_for_data,
+                    role_snapshot,
+                    event.data,
+                    event.response,
+                    event.connection,
+                );
             }
         });
-        *app.task.lock().unwrap() = Some(task);
+
+        // Connection-close janitor.
+        let mut close_rx = physical.subscribe_connection_close();
+        let buffers_for_close = Arc::clone(&buffers);
+        let close_task = tokio::spawn(async move {
+            while let Ok(conn_id) = close_rx.recv().await {
+                buffers_for_close.lock().unwrap().remove(&conn_id);
+            }
+        });
+
+        app.tasks.lock().unwrap().extend([data_task, close_task]);
         app
     }
-}
 
-impl Default for RtuApplicationLayer {
-    fn default() -> Self {
-        unreachable!("use RtuApplicationLayer::new(physical, ..) instead");
+    fn role_snapshot(&self) -> Option<ApplicationRole> {
+        *self.role.lock().unwrap()
     }
 }
 
-fn compute_interval_ms(
+pub(crate) fn compute_interval_ms(
     layer_type: crate::layers::physical::PhysicalLayerType,
     baud_rate: Option<u32>,
     interval_between_frames: Option<FrameInterval>,
@@ -113,9 +132,6 @@ fn compute_interval_ms(
                 };
                 let baud = baud_rate.unwrap_or(9600);
                 if baud > 19200 {
-                    // Modbus spec: at high baud rates the inter-frame delay is
-                    // fixed at 1.75 ms (round up to 2 to be safe; njs uses
-                    // ceil(1.8) = 2 as well).
                     2
                 } else {
                     let exact = (bits as f64 * 1000.0) / baud as f64;
@@ -126,7 +142,116 @@ fn compute_interval_ms(
     }
 }
 
-fn decode_frame(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
+fn process_data_event(
+    buffers: &Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
+    framing_tx: &broadcast::Sender<Framing>,
+    framing_error_tx: &broadcast::Sender<ModbusError>,
+    role: Option<ApplicationRole>,
+    data: Vec<u8>,
+    response: ResponseFn,
+    connection: ConnectionId,
+) {
+    let mut guard = buffers.lock().unwrap();
+    let buffer = guard.entry(Arc::clone(&connection)).or_default();
+    buffer.extend_from_slice(&data);
+
+    let is_response = matches!(role, Some(ApplicationRole::Master));
+
+    loop {
+        match try_extract(buffer, is_response) {
+            ExtractResult::Frame { skip, frame_len } => {
+                if skip > 0 {
+                    buffer.drain(..skip);
+                }
+                let frame_bytes: Vec<u8> = buffer[..frame_len].to_vec();
+                buffer.drain(..frame_len);
+                let adu = decode_inner(&frame_bytes).expect("checked by try_extract");
+                let _ = framing_tx.send(Framing {
+                    adu,
+                    raw: frame_bytes,
+                    response: Arc::clone(&response),
+                    connection: Arc::clone(&connection),
+                });
+            }
+            ExtractResult::Skip => {
+                buffer.drain(..1);
+            }
+            ExtractResult::Insufficient => break,
+            ExtractResult::Invalid => {
+                let _ = framing_error_tx.send(ModbusError::InvalidData);
+                buffer.clear();
+                break;
+            }
+        }
+    }
+
+    if buffer.is_empty() {
+        guard.remove(&connection);
+    }
+}
+
+enum ExtractResult {
+    Frame { skip: usize, frame_len: usize },
+    Insufficient,
+    Skip,
+    Invalid,
+}
+
+fn try_extract(buffer: &[u8], is_response: bool) -> ExtractResult {
+    if buffer.len() < MIN_FRAME_LENGTH {
+        return ExtractResult::Insufficient;
+    }
+    if let Some(expected) = predict_rtu_frame_length(buffer, is_response) {
+        if expected > MAX_FRAME_LENGTH {
+            return ExtractResult::Invalid;
+        }
+        if buffer.len() < expected {
+            return ExtractResult::Insufficient;
+        }
+        if crc_matches(buffer, expected) {
+            return ExtractResult::Frame {
+                skip: 0,
+                frame_len: expected,
+            };
+        }
+        // Predict matched but CRC failed — corruption or wrong alignment.
+        // Drop one byte and retry.
+        return ExtractResult::Skip;
+    }
+    sliding_extract(buffer)
+}
+
+fn sliding_extract(buffer: &[u8]) -> ExtractResult {
+    let last_start = buffer.len().saturating_sub(MIN_FRAME_LENGTH);
+    for start in 0..=last_start {
+        let remaining = &buffer[start..];
+        let max_len = remaining.len().min(MAX_FRAME_LENGTH);
+        for len in MIN_FRAME_LENGTH..=max_len {
+            if crc_matches(remaining, len) {
+                return ExtractResult::Frame {
+                    skip: start,
+                    frame_len: len,
+                };
+            }
+        }
+    }
+    if buffer.len() >= MAX_FRAME_LENGTH {
+        ExtractResult::Skip
+    } else {
+        ExtractResult::Insufficient
+    }
+}
+
+fn crc_matches(buffer: &[u8], length: usize) -> bool {
+    if length < 2 || length > buffer.len() {
+        return false;
+    }
+    let frame_crc = u16::from_le_bytes([buffer[length - 2], buffer[length - 1]]);
+    let computed = crc(&buffer[..length - 2]);
+    frame_crc == computed
+}
+
+fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
     if data.len() < 4 {
         return Err(ModbusError::InsufficientData);
     }
@@ -135,14 +260,11 @@ fn decode_frame(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
     if frame_crc != computed {
         return Err(ModbusError::CrcCheckFailed);
     }
-    let unit = data[0];
-    let fc = data[1];
-    let payload = data[2..data.len() - 2].to_vec();
     Ok(ApplicationDataUnit {
         transaction: None,
-        unit,
-        fc,
-        data: payload,
+        unit: data[0],
+        fc: data[1],
+        data: data[2..data.len() - 2].to_vec(),
     })
 }
 
@@ -163,7 +285,7 @@ impl ApplicationLayer for RtuApplicationLayer {
     }
 
     fn role(&self) -> Option<ApplicationRole> {
-        *self.role.lock().unwrap()
+        self.role_snapshot()
     }
 
     fn encode(&self, adu: &ApplicationDataUnit) -> Vec<u8> {
@@ -179,7 +301,7 @@ impl ApplicationLayer for RtuApplicationLayer {
     }
 
     fn decode(&self, data: &[u8]) -> Result<FramedDataUnit, ModbusError> {
-        let adu = decode_frame(data)?;
+        let adu = decode_inner(data)?;
         Ok(FramedDataUnit {
             adu,
             raw: data.to_vec(),
@@ -187,7 +309,7 @@ impl ApplicationLayer for RtuApplicationLayer {
     }
 
     fn flush(&self) {
-        // Per-connection buffers + 3.5T timer arrive in commit 3.
+        self.buffers.lock().unwrap().clear();
     }
 
     fn subscribe_framing(&self) -> broadcast::Receiver<Framing> {
@@ -199,8 +321,83 @@ impl ApplicationLayer for RtuApplicationLayer {
     }
 
     async fn destroy(&self) {
-        if let Some(task) = self.task.lock().unwrap().take() {
+        let mut tasks = self.tasks.lock().unwrap();
+        for task in tasks.drain(..) {
             task.abort();
         }
+        self.buffers.lock().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layers::physical::PhysicalLayerType;
+
+    #[test]
+    fn test_compute_interval_ms_net_returns_zero() {
+        assert_eq!(compute_interval_ms(PhysicalLayerType::Net, None, None), 0);
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Net, Some(9600), Some(FrameInterval::Ms(50))),
+            0,
+            "Net always ignores baud/interval inputs"
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_default_9600() {
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Serial, Some(9600), None),
+            5
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_default_19200() {
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Serial, Some(19200), None),
+            3
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_above_19200_uses_fixed() {
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Serial, Some(38400), None),
+            2
+        );
+        assert_eq!(
+            compute_interval_ms(PhysicalLayerType::Serial, Some(115200), None),
+            2
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_explicit_ms() {
+        assert_eq!(
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                Some(9600),
+                Some(FrameInterval::Ms(20))
+            ),
+            20
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_explicit_bits() {
+        assert_eq!(
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                Some(9600),
+                Some(FrameInterval::Bits(96))
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn test_compute_interval_ms_serial_default_baud_when_unspecified() {
+        assert_eq!(compute_interval_ms(PhysicalLayerType::Serial, None, None), 5);
     }
 }

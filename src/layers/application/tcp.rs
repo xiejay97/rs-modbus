@@ -1,60 +1,138 @@
 use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationRole, Framing};
-use crate::layers::physical::PhysicalLayer;
+use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+
+const MAX_TCP_FRAME: usize = 260;
 
 pub struct TcpApplicationLayer {
     role: Mutex<Option<ApplicationRole>>,
     transaction_id: AtomicU16,
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
+    buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
     _framing_rx: Mutex<broadcast::Receiver<Framing>>,
     _framing_error_rx: Mutex<broadcast::Receiver<ModbusError>>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl TcpApplicationLayer {
     pub fn new<P: PhysicalLayer + 'static>(physical: Arc<P>) -> Arc<Self> {
         let (framing_tx, framing_rx) = broadcast::channel(64);
         let (framing_error_tx, framing_error_rx) = broadcast::channel(64);
+        let buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let app = Arc::new(Self {
             role: Mutex::new(None),
             transaction_id: AtomicU16::new(0),
             framing_tx: framing_tx.clone(),
             framing_error_tx: framing_error_tx.clone(),
+            buffers: Arc::clone(&buffers),
             _framing_rx: Mutex::new(framing_rx),
             _framing_error_rx: Mutex::new(framing_error_rx),
-            task: Mutex::new(None),
+            tasks: Mutex::new(Vec::new()),
         });
 
+        // Data ingestion task.
         let mut data_rx = physical.subscribe_data();
-        let task = tokio::spawn(async move {
+        let buffers_for_data = Arc::clone(&buffers);
+        let framing_tx_for_data = framing_tx.clone();
+        let framing_error_tx_for_data = framing_error_tx.clone();
+        let data_task = tokio::spawn(async move {
             while let Ok(event) = data_rx.recv().await {
-                match decode_frame(&event.data) {
-                    Ok(adu) => {
-                        let _ = framing_tx.send(Framing {
-                            adu,
-                            raw: event.data,
-                            response: event.response,
-                            connection: event.connection,
-                        });
-                    }
-                    Err(err) => {
-                        let _ = framing_error_tx.send(err);
-                    }
-                }
+                process_data_event(
+                    &buffers_for_data,
+                    &framing_tx_for_data,
+                    &framing_error_tx_for_data,
+                    event.data,
+                    event.response,
+                    event.connection,
+                );
             }
         });
-        *app.task.lock().unwrap() = Some(task);
+
+        // Connection-close janitor: discard the buffer for closed connections.
+        let mut close_rx = physical.subscribe_connection_close();
+        let buffers_for_close = Arc::clone(&buffers);
+        let close_task = tokio::spawn(async move {
+            while let Ok(conn_id) = close_rx.recv().await {
+                buffers_for_close.lock().unwrap().remove(&conn_id);
+            }
+        });
+
+        app.tasks.lock().unwrap().extend([data_task, close_task]);
         app
     }
 }
 
-fn decode_frame(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
+fn process_data_event(
+    buffers: &Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
+    framing_tx: &broadcast::Sender<Framing>,
+    framing_error_tx: &broadcast::Sender<ModbusError>,
+    data: Vec<u8>,
+    response: ResponseFn,
+    connection: ConnectionId,
+) {
+    let mut guard = buffers.lock().unwrap();
+    let buffer = guard.entry(Arc::clone(&connection)).or_default();
+    buffer.extend_from_slice(&data);
+
+    loop {
+        match try_extract_frame(buffer) {
+            ExtractResult::Frame(frame_bytes) => {
+                let raw = frame_bytes.clone();
+                buffer.drain(..frame_bytes.len());
+                let _ = framing_tx.send(Framing {
+                    adu: decode_inner(&frame_bytes).expect("checked by try_extract"),
+                    raw,
+                    response: Arc::clone(&response),
+                    connection: Arc::clone(&connection),
+                });
+            }
+            ExtractResult::Insufficient => break,
+            ExtractResult::Invalid => {
+                let _ = framing_error_tx.send(ModbusError::InvalidData);
+                buffer.clear();
+                break;
+            }
+        }
+    }
+
+    if buffer.is_empty() {
+        guard.remove(&connection);
+    }
+}
+
+enum ExtractResult {
+    Frame(Vec<u8>),
+    Insufficient,
+    Invalid,
+}
+
+fn try_extract_frame(buffer: &[u8]) -> ExtractResult {
+    if buffer.len() < 8 {
+        return ExtractResult::Insufficient;
+    }
+    if buffer[2] != 0 || buffer[3] != 0 {
+        return ExtractResult::Invalid;
+    }
+    let length = u16::from_be_bytes([buffer[4], buffer[5]]) as usize;
+    let total = 6 + length;
+    if total > MAX_TCP_FRAME || length < 2 {
+        return ExtractResult::Invalid;
+    }
+    if buffer.len() < total {
+        return ExtractResult::Insufficient;
+    }
+    ExtractResult::Frame(buffer[..total].to_vec())
+}
+
+fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
     if data.len() < 8 {
         return Err(ModbusError::InsufficientData);
     }
@@ -114,7 +192,7 @@ impl ApplicationLayer for TcpApplicationLayer {
     }
 
     fn decode(&self, data: &[u8]) -> Result<FramedDataUnit, ModbusError> {
-        let adu = decode_frame(data)?;
+        let adu = decode_inner(data)?;
         Ok(FramedDataUnit {
             adu,
             raw: data.to_vec(),
@@ -122,8 +200,7 @@ impl ApplicationLayer for TcpApplicationLayer {
     }
 
     fn flush(&self) {
-        // TCP framing is stateless in this commit; per-connection reassembly
-        // buffers arrive in commit 3.
+        self.buffers.lock().unwrap().clear();
     }
 
     fn subscribe_framing(&self) -> broadcast::Receiver<Framing> {
@@ -135,8 +212,10 @@ impl ApplicationLayer for TcpApplicationLayer {
     }
 
     async fn destroy(&self) {
-        if let Some(task) = self.task.lock().unwrap().take() {
+        let mut tasks = self.tasks.lock().unwrap();
+        for task in tasks.drain(..) {
             task.abort();
         }
+        self.buffers.lock().unwrap().clear();
     }
 }

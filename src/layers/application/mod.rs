@@ -65,7 +65,7 @@ mod rtu;
 mod tcp;
 
 pub use ascii::AsciiApplicationLayer;
-pub use rtu::RtuApplicationLayer;
+pub use rtu::{FrameInterval, RtuApplicationLayer};
 pub use tcp::TcpApplicationLayer;
 
 #[cfg(test)]
