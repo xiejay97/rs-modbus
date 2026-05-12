@@ -554,3 +554,162 @@ async fn test_timeout() {
     master.destroy().await;
     slave.destroy().await;
 }
+
+/// A model that *only* implements the single-point primitives, exercising
+/// the `ModbusSlaveModel` trait's default fallbacks for FC15/16/22.
+struct SingleOnlyModel {
+    coils: Arc<Mutex<HashMap<u16, bool>>>,
+    holding_registers: Arc<Mutex<HashMap<u16, u16>>>,
+}
+
+#[async_trait::async_trait]
+impl ModbusSlaveModel for SingleOnlyModel {
+    fn unit(&self) -> u8 {
+        UNIT
+    }
+
+    fn address_range(&self) -> AddressRange {
+        AddressRange {
+            coils: vec![(0, 65535)],
+            holding_registers: vec![(0, 65535)],
+            ..Default::default()
+        }
+    }
+
+    async fn read_coils(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
+        let guard = self.coils.lock().await;
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
+    }
+
+    async fn write_single_coil(
+        &self,
+        address: u16,
+        value: bool,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
+        self.coils.lock().await.insert(address, value);
+        Ok(())
+    }
+
+    async fn read_holding_registers(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
+        let guard = self.holding_registers.lock().await;
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
+    }
+
+    async fn write_single_register(
+        &self,
+        address: u16,
+        value: u16,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
+        self.holding_registers.lock().await.insert(address, value);
+        Ok(())
+    }
+    // NOTE: write_multiple_coils / write_multiple_registers /
+    // mask_write_register intentionally NOT implemented — the trait
+    // defaults should loop the single-point versions or do read-modify-write.
+}
+
+async fn create_single_only_slave() -> (
+    ModbusSlave<TcpApplicationLayer, TcpServerPhysicalLayer>,
+    Arc<TcpServerPhysicalLayer>,
+    Arc<Mutex<HashMap<u16, bool>>>,
+    Arc<Mutex<HashMap<u16, u16>>>,
+) {
+    let physical = TcpServerPhysicalLayer::new();
+    physical.set_addr("127.0.0.1:0".to_string()).await;
+    let application = TcpApplicationLayer::new(physical.clone());
+    let slave = ModbusSlave::new(application, Arc::clone(&physical));
+
+    let coils = Arc::new(Mutex::new(HashMap::new()));
+    let holding_registers = Arc::new(Mutex::new(HashMap::new()));
+
+    slave
+        .add(Box::new(SingleOnlyModel {
+            coils: Arc::clone(&coils),
+            holding_registers: Arc::clone(&holding_registers),
+        }))
+        .await;
+    slave.open().await.unwrap();
+    (slave, physical, coils, holding_registers)
+}
+
+#[tokio::test]
+async fn test_fc15_falls_back_to_write_single_coil() {
+    let (slave, server, coils, _hr) = create_single_only_slave().await;
+    let master = create_master(&server).await;
+
+    // FC15 with no `write_multiple_coils` impl — trait default should loop
+    // `write_single_coil` and succeed.
+    let result = master
+        .write_multiple_coils(UNIT, 100, &[true, false, true, true], None)
+        .await
+        .unwrap();
+    assert_eq!(result, Some(vec![true, false, true, true]));
+
+    let guard = coils.lock().await;
+    assert!(*guard.get(&100).unwrap());
+    assert!(!*guard.get(&101).unwrap());
+    assert!(*guard.get(&102).unwrap());
+    assert!(*guard.get(&103).unwrap());
+
+    master.destroy().await;
+    slave.destroy().await;
+}
+
+#[tokio::test]
+async fn test_fc16_falls_back_to_write_single_register() {
+    let (slave, server, _coils, holding_registers) = create_single_only_slave().await;
+    let master = create_master(&server).await;
+
+    let result = master
+        .write_multiple_registers(UNIT, 200, &[0x1111, 0x2222, 0x3333], None)
+        .await
+        .unwrap();
+    assert_eq!(result, Some(vec![0x1111, 0x2222, 0x3333]));
+
+    let guard = holding_registers.lock().await;
+    assert_eq!(*guard.get(&200).unwrap(), 0x1111);
+    assert_eq!(*guard.get(&201).unwrap(), 0x2222);
+    assert_eq!(*guard.get(&202).unwrap(), 0x3333);
+
+    master.destroy().await;
+    slave.destroy().await;
+}
+
+#[tokio::test]
+async fn test_fc22_falls_back_to_read_modify_write_single() {
+    let (slave, server, _coils, holding_registers) = create_single_only_slave().await;
+    let master = create_master(&server).await;
+
+    // Pre-populate register so the read-modify-write has meaningful input.
+    holding_registers.lock().await.insert(300, 0b11110000);
+
+    let and_mask: u16 = 0b00001111;
+    let or_mask: u16 = 0b10101010;
+    let _ = master
+        .mask_write_register(UNIT, 300, and_mask, or_mask, None)
+        .await
+        .unwrap();
+
+    // Expected: (existing & andMask) | (orMask & !andMask)
+    //          = (0b11110000 & 0b00001111) | (0b10101010 & 0b11110000)
+    //          = 0                          | 0b10100000
+    //          = 0b10100000
+    let expected = (0b11110000u16 & and_mask) | (or_mask & !and_mask);
+    let stored = *holding_registers.lock().await.get(&300).unwrap();
+    assert_eq!(stored, expected);
+
+    master.destroy().await;
+    slave.destroy().await;
+}

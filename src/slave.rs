@@ -29,12 +29,18 @@ pub trait ModbusSlaveModel: Send + Sync {
     async fn write_single_coil(&self, _address: u16, _value: bool) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
+    /// Default: loop `write_single_coil`. Mirrors njs-modbus' behavior where
+    /// a model that only provides `writeSingleCoil` is automatically usable
+    /// for FC15 requests. Override to provide a bulk-write fast path.
     async fn write_multiple_coils(
         &self,
-        _address: u16,
-        _values: &[bool],
+        address: u16,
+        values: &[bool],
     ) -> Result<(), ModbusError> {
-        Err(ModbusError::IllegalFunction)
+        for (i, &v) in values.iter().enumerate() {
+            self.write_single_coil(address + i as u16, v).await?;
+        }
+        Ok(())
     }
 
     async fn read_discrete_inputs(
@@ -55,20 +61,29 @@ pub trait ModbusSlaveModel: Send + Sync {
     async fn write_single_register(&self, _address: u16, _value: u16) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
+    /// Default: loop `write_single_register`. See [`write_multiple_coils`].
     async fn write_multiple_registers(
         &self,
-        _address: u16,
-        _values: &[u16],
+        address: u16,
+        values: &[u16],
     ) -> Result<(), ModbusError> {
-        Err(ModbusError::IllegalFunction)
+        for (i, &v) in values.iter().enumerate() {
+            self.write_single_register(address + i as u16, v).await?;
+        }
+        Ok(())
     }
+    /// Default: read-modify-write using `read_holding_registers` +
+    /// `write_single_register`. Mirrors njs-modbus' fallback.
     async fn mask_write_register(
         &self,
-        _address: u16,
-        _and_mask: u16,
-        _or_mask: u16,
+        address: u16,
+        and_mask: u16,
+        or_mask: u16,
     ) -> Result<(), ModbusError> {
-        Err(ModbusError::IllegalFunction)
+        let regs = self.read_holding_registers(address, 1).await?;
+        let current = *regs.first().ok_or(ModbusError::ServerDeviceFailure)?;
+        let new = (current & and_mask) | (or_mask & !and_mask);
+        self.write_single_register(address, new).await
     }
 
     async fn read_input_registers(
@@ -123,20 +138,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let application = Arc::clone(&self.application);
         let models = Arc::clone(&self.models);
 
+        // Dispatch task: pull queued frames and run FC handlers.
         tokio::spawn(async move {
             while let Some((frame, response_fn)) = rx.recv().await {
                 Self::process_frame(&application, &models, frame, response_fn).await;
             }
         });
 
-        let application = Arc::clone(&self.application);
+        // Framing-ingestion task: subscribe to application.framing and push
+        // into the dispatch queue. This is the same data flow as njs-modbus,
+        // where the slave hooks `application.on('framing')`.
         let tx = self.tx.lock().await.clone().unwrap();
-        let mut data_rx = self.physical.subscribe_data();
-
+        let mut framing_rx = self.application.subscribe_framing();
         tokio::spawn(async move {
-            while let Ok(event) = data_rx.recv().await {
-                if let Ok(frame) = application.decode(&event.data) {
-                    let _ = tx.send((frame, event.response)).await;
+            while let Ok(framing) = framing_rx.recv().await {
+                let framed = FramedDataUnit {
+                    adu: framing.adu,
+                    raw: framing.raw,
+                };
+                if tx.send((framed, framing.response)).await.is_err() {
+                    break;
                 }
             }
         });
