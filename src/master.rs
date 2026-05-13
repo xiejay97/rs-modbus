@@ -54,17 +54,43 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         application
             .set_role(ApplicationRole::Master)
             .expect("application layer is already bound to a different role");
+        let session = Arc::new(MasterSession::new());
+
+        let session_for_framing = Arc::clone(&session);
+        let mut framing_rx = application.subscribe_framing();
+        let framing_task = tokio::spawn(async move {
+            loop {
+                match framing_rx.recv().await {
+                    Ok(frame) => session_for_framing.handle_frame(frame),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        let session_for_error = Arc::clone(&session);
+        let mut error_rx = application.subscribe_framing_error();
+        let error_task = tokio::spawn(async move {
+            loop {
+                match error_rx.recv().await {
+                    Ok(err) => session_for_error.handle_error(err),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
         Self {
             application,
             physical,
-            session: Arc::new(MasterSession::new()),
+            session,
             timeout_ms: options.timeout_ms,
             concurrent: options.concurrent,
             next_tid: AtomicU16::new(1),
             closed: AtomicBool::new(false),
             clean_level: AtomicU8::new(0),
             queue_lock: tokio::sync::Mutex::new(()),
-            tasks: Mutex::new(Vec::new()),
+            tasks: Mutex::new(vec![framing_task, error_task]),
         }
     }
 
@@ -104,36 +130,6 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         self.clean_level.store(0, Ordering::Release);
         self.closed.store(false, Ordering::Release);
         self.next_tid.store(1, Ordering::Release);
-
-        let session = Arc::clone(&self.session);
-        let mut framing_rx = self.application.subscribe_framing();
-        let framing_task = tokio::spawn(async move {
-            loop {
-                match framing_rx.recv().await {
-                    Ok(frame) => session.handle_frame(frame),
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-
-        let session = Arc::clone(&self.session);
-        let mut error_rx = self.application.subscribe_framing_error();
-        let error_task = tokio::spawn(async move {
-            loop {
-                match error_rx.recv().await {
-                    Ok(err) => session.handle_error(err),
-                    Err(RecvError::Lagged(_)) => continue,
-                    Err(RecvError::Closed) => break,
-                }
-            }
-        });
-
-        self.tasks
-            .lock()
-            .unwrap()
-            .extend([framing_task, error_task]);
-
         self.physical.open().await?;
         Ok(())
     }

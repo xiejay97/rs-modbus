@@ -124,7 +124,7 @@ pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
-    custom_function_codes: tokio::sync::Mutex<HashMap<u8, CustomFunctionCode>>,
+    custom_function_codes: std::sync::Mutex<HashMap<u8, CustomFunctionCode>>,
     clean_level: std::sync::atomic::AtomicU8,
     /// Per-address async locks for FC22/FC23 fallback paths. Maps a register
     /// address to a tokio mutex; requests that touch overlapping addresses
@@ -156,7 +156,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tasks: tokio::sync::Mutex::new(Vec::new()),
             is_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            custom_function_codes: tokio::sync::Mutex::new(HashMap::new()),
+            custom_function_codes: std::sync::Mutex::new(HashMap::new()),
             address_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             clean_level: std::sync::atomic::AtomicU8::new(0),
         }
@@ -190,7 +190,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let queues = Arc::clone(&self.queues);
         let address_locks = Arc::clone(&self.address_locks);
         let custom_fcs: Arc<HashMap<u8, CustomFunctionCode>> =
-            Arc::new(self.custom_function_codes.lock().await.clone());
+            Arc::new(self.custom_function_codes.lock().unwrap().clone());
         let concurrent = self.concurrent;
         let is_open = Arc::clone(&self.is_open);
         let mut framing_rx = self.application.subscribe_framing();
@@ -300,7 +300,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         self.queues.lock().await.clear();
         self.address_locks.lock().await.clear();
         if level == 2 {
-            self.custom_function_codes.lock().await.clear();
+            self.custom_function_codes.lock().unwrap().clear();
             self.models.lock().await.clear();
         }
         self.clean_level
@@ -1327,13 +1327,13 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         }
     }
 
-    pub async fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
+    pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
         self.application.add_custom_function_code(cfc.clone());
-        self.custom_function_codes.lock().await.insert(cfc.fc, cfc);
+        self.custom_function_codes.lock().unwrap().insert(cfc.fc, cfc);
     }
 
-    pub async fn remove_custom_function_code(&self, fc: u8) {
+    pub fn remove_custom_function_code(&self, fc: u8) {
         self.application.remove_custom_function_code(fc);
-        self.custom_function_codes.lock().await.remove(&fc);
+        self.custom_function_codes.lock().unwrap().remove(&fc);
     }
 }
