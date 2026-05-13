@@ -2,6 +2,17 @@
 
 A pure Rust implementation of MODBUS protocol.
 
+<div>
+
+<!-- prettier-ignore-start -->
+[![Crates.io](https://img.shields.io/crates/v/rs-modbus.svg?style=flat-square)](https://crates.io/crates/rs-modbus)
+[![Crates.io downloads](https://img.shields.io/crates/d/rs-modbus.svg?style=flat-square)](https://crates.io/crates/rs-modbus)
+[![Docs.rs](https://img.shields.io/badge/docs.rs-rs--modbus-green.svg?style=flat-square)](https://docs.rs/rs-modbus)
+[![CI](https://github.com/xiejay97/rs-modbus/workflows/CI/badge.svg)](https://github.com/xiejay97/rs-modbus/actions)
+<!-- prettier-ignore-end -->
+
+</div>
+
 ## Introduction
 
 `rs-modbus` is designed as a layered architecture, including the physical layer and the application layer:
@@ -158,4 +169,4 @@ is uncommon anyway).
 
 ## License
 
-MIT
+[![GitHub license](https://img.shields.io/github/license/xiejay97/rs-modbus?style=flat-square)](LICENSE)
