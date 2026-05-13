@@ -9,7 +9,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::Mutex;
 
 type SlaveResponseFn = Arc<
     dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), ModbusError>> + Send>> + Send + Sync,
@@ -120,12 +119,16 @@ struct QueueEntry {
 pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     application: Arc<A>,
     physical: Arc<P>,
-    pub models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+    pub models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
     pub concurrent: bool,
-    queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
-    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
+    tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
-    custom_function_codes: Mutex<HashMap<u8, CustomFunctionCode>>,
+    custom_function_codes: tokio::sync::Mutex<HashMap<u8, CustomFunctionCode>>,
+    /// Per-address async locks for FC22/FC23 fallback paths. Maps a register
+    /// address to a tokio mutex; requests that touch overlapping addresses
+    /// are serialized. Mirrors njs-modbus `withAddressLock`.
+    address_locks: Arc<tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P> {
@@ -147,12 +150,13 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         Self {
             application,
             physical,
-            models: Arc::new(Mutex::new(HashMap::new())),
+            models: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             concurrent: options.concurrent,
-            queues: Arc::new(Mutex::new(HashMap::new())),
-            tasks: Mutex::new(Vec::new()),
+            queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            tasks: tokio::sync::Mutex::new(Vec::new()),
             is_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            custom_function_codes: Mutex::new(HashMap::new()),
+            custom_function_codes: tokio::sync::Mutex::new(HashMap::new()),
+            address_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -180,6 +184,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let application = Arc::clone(&self.application);
         let models = Arc::clone(&self.models);
         let queues = Arc::clone(&self.queues);
+        let address_locks = Arc::clone(&self.address_locks);
         let custom_fcs: Arc<HashMap<u8, CustomFunctionCode>> =
             Arc::new(self.custom_function_codes.lock().await.clone());
         let concurrent = self.concurrent;
@@ -202,8 +207,9 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                             let app = Arc::clone(&application);
                             let mdls = Arc::clone(&models);
                             let cfs = Arc::clone(&custom_fcs);
+                            let locks = Arc::clone(&address_locks);
                             tokio::spawn(async move {
-                                Self::process_frame(&app, &mdls, &cfs, frame, framing.response).await;
+                                Self::process_frame(&app, &mdls, &cfs, &locks, frame, framing.response).await;
                             });
                         } else {
                             // Per-connection FIFO: push onto this
@@ -214,6 +220,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                                 Arc::clone(&application),
                                 Arc::clone(&models),
                                 Arc::clone(&custom_fcs),
+                                Arc::clone(&address_locks),
                                 framing.connection,
                                 frame,
                                 framing.response,
@@ -293,17 +300,62 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             }
         }
         self.queues.lock().await.clear();
+        self.address_locks.lock().await.clear();
         let _ = self.physical.destroy().await;
+    }
+
+    /// Acquire an async lock for each address in `addresses`, execute `f`, then
+    /// release all locks. Addresses are deduplicated and sorted before locking
+    /// to avoid deadlocks. Mirrors njs-modbus `withAddressLock`.
+    async fn with_address_lock<F, Fut, T>(
+        address_locks: &tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
+        addresses: &[u16],
+        f: F,
+    ) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let mut sorted: Vec<u16> = addresses.iter().copied().collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+
+        // Collect the Arc<Mutex<()>> for each address (may create new entries).
+        let lock_arcs: Vec<Arc<tokio::sync::Mutex<()>>> = {
+            let mut locks = address_locks.lock().await;
+            sorted
+                .iter()
+                .map(|&addr| {
+                    locks
+                        .entry(addr)
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                })
+                .collect()
+        };
+
+        // Acquire all locks in sorted order. Locking in a consistent sorted
+        // order ensures no two concurrent `with_address_lock` calls can
+        // deadlock with each other, even if their address sets overlap.
+        let mut guards: Vec<tokio::sync::MutexGuard<'_, ()>> = Vec::with_capacity(lock_arcs.len());
+        for arc in &lock_arcs {
+            guards.push(arc.lock().await);
+        }
+
+        let result = f().await;
+        drop(guards);
+        result
     }
 
     /// Push a frame onto the per-connection queue. If no drain task is
     /// currently running for this connection, spawn one; otherwise the
     /// already-running drain picks the new item up on its next iteration.
     async fn enqueue_and_drain(
-        queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
+        queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
-        models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
+        address_locks: Arc<tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>>,
         connection: ConnectionId,
         frame: FramedDataUnit,
         response: ResponseFn,
@@ -324,7 +376,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         };
         if should_spawn {
             tokio::spawn(async move {
-                Self::drain_loop(queues, application, models, custom_fcs, connection).await;
+                Self::drain_loop(queues, application, models, custom_fcs, address_locks, connection).await;
             });
         }
     }
@@ -335,10 +387,11 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     /// clients). If the entry is gone mid-drain (cleared by a
     /// `connection_close` handler), we bail early.
     async fn drain_loop(
-        queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
+        queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
-        models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
+        address_locks: Arc<tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>>,
         connection: ConnectionId,
     ) {
         loop {
@@ -351,7 +404,10 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             };
             match next {
                 Some((frame, response)) => {
-                    Self::process_frame(&application, &models, &custom_fcs, frame, response).await;
+                    Self::process_frame(
+                        &application, &models, &custom_fcs, &address_locks, frame, response,
+                    )
+                    .await;
                 }
                 None => {
                     let mut g = queues.lock().await;
@@ -372,8 +428,9 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
     async fn process_frame(
         application: &Arc<A>,
-        models: &Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: &Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: &HashMap<u8, CustomFunctionCode>,
+        address_locks: &tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
         frame: FramedDataUnit,
         response_fn: ResponseFn,
     ) {
@@ -460,10 +517,10 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                     Self::handle_fc17(application, model, &frame.adu, Arc::clone(&response)).await
                 }
                 0x16 => {
-                    Self::handle_fc22(application, model, &frame.adu, Arc::clone(&response)).await
+                    Self::handle_fc22(application, model, address_locks, &frame.adu, Arc::clone(&response)).await
                 }
                 0x17 => {
-                    Self::handle_fc23(application, model, &frame.adu, Arc::clone(&response)).await
+                    Self::handle_fc23(application, model, address_locks, &frame.adu, Arc::clone(&response)).await
                 }
                 0x2b => {
                     Self::handle_fc43_14(application, model, &frame.adu, Arc::clone(&response))
@@ -972,6 +1029,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     async fn handle_fc22(
         application: &Arc<A>,
         model: &dyn ModbusSlaveModel,
+        address_locks: &tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -992,7 +1050,10 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             .await;
         }
 
-        let result = model.mask_write_register(address, and_mask, or_mask).await;
+        let result = Self::with_address_lock(address_locks, &[address], || async {
+            model.mask_write_register(address, and_mask, or_mask).await
+        })
+        .await;
 
         match result {
             Ok(()) => response(application.encode(adu)).await,
@@ -1004,6 +1065,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     async fn handle_fc23(
         application: &Arc<A>,
         model: &dyn ModbusSlaveModel,
+        address_locks: &tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
         adu: &ApplicationDataUnit,
         response: SlaveResponseFn,
     ) -> Result<(), ModbusError> {
@@ -1053,10 +1115,15 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             })
             .collect();
 
-        if let Err(e) = model
-            .write_multiple_registers(write_address, &write_values)
-            .await
-        {
+        let write_addresses: Vec<u16> =
+            (0..write_length).map(|i| write_address + i).collect();
+
+        let write_result = Self::with_address_lock(address_locks, &write_addresses, || async {
+            model.write_multiple_registers(write_address, &write_values).await
+        })
+        .await;
+
+        if let Err(e) = write_result {
             return Self::response_error(application, adu, response, &e).await;
         }
 

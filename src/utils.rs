@@ -1,6 +1,4 @@
 use crate::vars::{FunctionCode, EXCEPTION_OFFSET, MEI_READ_DEVICE_ID};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CRC_TABLE: [u16; 256] = [
     0x0000, 0xc0c1, 0xc181, 0x0140, 0xc301, 0x03c0, 0x0280, 0xc241, 0xc601, 0x06c0, 0x0780, 0xc741,
@@ -257,22 +255,13 @@ fn predict_fc43_14_response(buffer: &[u8]) -> PredictResult {
     PredictResult::Length(offset + 2)
 }
 
-static CONNECTION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a process-unique connection id with the given prefix.
+/// Generate a cross-process-unique connection id with the given prefix.
 ///
-/// Format: `{prefix}-{nanos_since_epoch}-{seq}` where seq is a monotonically
-/// increasing per-process counter. Used by physical layer implementations to
-/// identify individual sockets / serial ports.
+/// Format: `{prefix}-{uuid-v4}`. Uses RFC 4122 UUID v4 (128-bit random)
+/// so IDs are unique even when multiple processes start simultaneously.
+/// Mirrors njs-modbus `crypto.randomUUID()`.
 pub fn gen_connection_id(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = CONNECTION_ID_SEQ
-        .fetch_add(1, Ordering::Relaxed)
-        .wrapping_add(1);
-    format!("{prefix}-{nanos}-{seq}")
+    format!("{prefix}-{}", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]
@@ -704,5 +693,32 @@ mod tests {
         let b = gen_connection_id("b");
         assert!(a.starts_with("a-"));
         assert!(b.starts_with("b-"));
+    }
+
+    #[test]
+    fn test_gen_connection_id_uuid_v4_format() {
+        let id = gen_connection_id("tcp");
+        // Format: tcp-{uuid-v4} where uuid is 8-4-4-4-12 hex chars
+        let uuid_part = id.strip_prefix("tcp-").unwrap();
+        let parts: Vec<&str> = uuid_part.split('-').collect();
+        assert_eq!(parts.len(), 5, "expected 5 hyphen-separated parts");
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        // Version nibble must be 4
+        assert_eq!(
+            parts[2].chars().next().unwrap(),
+            '4',
+            "UUID version nibble must be 4"
+        );
+        // Variant nibble must be 8, 9, a, or b
+        let variant = parts[3].chars().next().unwrap();
+        assert!(
+            matches!(variant, '8' | '9' | 'a' | 'b'),
+            "UUID variant nibble must be 8-9-a-b, got {}",
+            variant
+        );
     }
 }

@@ -208,7 +208,7 @@ fn drive_fsm(
         let _ = framing_error_tx.send(ModbusError::InvalidData);
     }
     for _ in 0..invalid_hex {
-        let _ = framing_error_tx.send(ModbusError::InvalidData);
+        let _ = framing_error_tx.send(ModbusError::InvalidHex);
     }
     for ascii_payload in completed_frames {
         match decode_payload(&ascii_payload) {
@@ -236,7 +236,8 @@ fn decode_payload(payload: &[u8]) -> Result<(ApplicationDataUnit, Vec<u8>), Modb
     }
     let mut bytes = Vec::with_capacity(payload.len() / 2);
     for chunk in payload.chunks(2) {
-        let b = hex_decode_byte(chunk[0], chunk[1]).ok_or(ModbusError::InvalidData)?;
+        let b = hex_decode_byte(chunk[0], chunk[1])
+            .ok_or(ModbusError::InvalidHex)?;
         bytes.push(b);
     }
     if bytes.len() < 3 {

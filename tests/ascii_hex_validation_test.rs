@@ -119,8 +119,8 @@ async fn strict_rejects_lowercase_hex_frame() {
         .expect("framing-error within 2s")
         .expect("error channel open");
     assert!(
-        matches!(err, ModbusError::InvalidData),
-        "expected InvalidData hex-validation error, got {err:?}"
+        matches!(err, ModbusError::InvalidHex),
+        "expected InvalidHex hex-validation error, got {err:?}"
     );
 
     // No valid framing should have been emitted.
@@ -147,8 +147,8 @@ async fn strict_rejects_non_hex_garbage() {
         .expect("framing-error within 2s")
         .expect("error channel open");
     assert!(
-        matches!(err, ModbusError::InvalidData),
-        "expected InvalidData hex-validation error, got {err:?}"
+        matches!(err, ModbusError::InvalidHex),
+        "expected InvalidHex hex-validation error, got {err:?}"
     );
 
     client.destroy().await;
@@ -244,8 +244,8 @@ async fn lenient_still_rejects_non_hex_garbage() {
         .expect("framing-error within 2s")
         .expect("error channel open");
     assert!(
-        matches!(err, ModbusError::InvalidData),
-        "expected InvalidData hex-validation error in lenient mode too, got {err:?}"
+        matches!(err, ModbusError::InvalidHex),
+        "expected InvalidHex hex-validation error in lenient mode too, got {err:?}"
     );
 
     client.destroy().await;

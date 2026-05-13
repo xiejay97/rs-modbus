@@ -26,6 +26,8 @@ pub enum ModbusError {
     InvalidResponse,
     #[error("Invalid data")]
     InvalidData,
+    #[error("Invalid hex character")]
+    InvalidHex,
     #[error("Timeout")]
     Timeout,
     #[error("Port is not open")]

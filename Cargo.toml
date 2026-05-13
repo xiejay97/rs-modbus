@@ -22,6 +22,7 @@ tokio = { version = "1", default-features = false, features = ["io-util", "net",
 thiserror = "1"
 async-trait = "0.1"
 serialport = { version = "4", optional = true }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []

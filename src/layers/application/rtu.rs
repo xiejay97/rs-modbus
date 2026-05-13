@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 const MAX_FRAME_LENGTH: usize = 256;
 const MIN_FRAME_LENGTH: usize = 4;
+const POOL_SIZE: usize = MAX_FRAME_LENGTH * 2;
 
 /// Inter-frame timing for RTU. Mirrors njs-modbus
 /// `intervalBetweenFrames?: { unit: 'bit' | 'ms'; value: number }`.
@@ -47,7 +48,7 @@ pub struct RtuApplicationLayer {
     role: Arc<Mutex<Option<ApplicationRole>>>,
     framing_tx: broadcast::Sender<Framing>,
     framing_error_tx: broadcast::Sender<ModbusError>,
-    buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
+    buffers: Arc<Mutex<HashMap<ConnectionId, RtuBuffer>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// User-defined predictors for non-standard FCs.
     custom_function_codes: Mutex<HashMap<u8, CustomFunctionCode>>,
@@ -57,6 +58,81 @@ pub struct RtuApplicationLayer {
     /// Computed millisecond timeout for the t1.5 inter-character gap.
     /// `0` when disabled.
     inter_char_ms: u32,
+}
+
+/// Fixed-size byte pool for per-connection RTU frame buffering.
+///
+/// Mirrors njs-modbus `state.pool` + `start`/`end` indices. A single large
+/// inbound chunk (e.g. 80 frames × 8 bytes = 640 bytes) is loop-consumed
+/// into the pool; whenever the pool fills, `flush()` is invoked to extract
+/// any complete frames before copying resumes. This prevents unbounded
+/// `Vec` growth and eliminates the silent-truncation hazard that existed
+/// when a `Buffer.copy` target was smaller than the source.
+struct RtuBuffer {
+    pool: Box<[u8]>,
+    start: usize,
+    end: usize,
+}
+
+impl RtuBuffer {
+    fn new() -> Self {
+        Self {
+            pool: vec![0u8; POOL_SIZE].into_boxed_slice(),
+            start: 0,
+            end: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.pool[self.start..self.end]
+    }
+
+    fn available(&self) -> usize {
+        self.pool.len() - self.end
+    }
+
+    /// Copy up to `data.len()` bytes (or `available()` bytes, whichever is
+    /// smaller) into the pool at `end`. Returns the number of bytes copied.
+    fn extend_from_slice(&mut self, data: &[u8]) -> usize {
+        let n = data.len().min(self.available());
+        self.pool[self.end..self.end + n].copy_from_slice(&data[..n]);
+        self.end += n;
+        n
+    }
+
+    /// Advance `start` by `n` bytes.
+    fn drain(&mut self, n: usize) {
+        self.start += n;
+    }
+
+    /// Shift unconsumed bytes to the front of the pool so `available()`
+    /// reflects the true free space.
+    fn compact(&mut self) {
+        if self.start > 0 {
+            if self.start < self.end {
+                let len = self.end - self.start;
+                self.pool.copy_within(self.start..self.end, 0);
+                self.start = 0;
+                self.end = len;
+            } else {
+                self.start = 0;
+                self.end = 0;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.start = 0;
+        self.end = 0;
+    }
 }
 
 
@@ -81,7 +157,7 @@ impl RtuApplicationLayer {
 
         let (framing_tx, _) = broadcast::channel(64);
         let (framing_error_tx, _) = broadcast::channel(64);
-        let buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>> =
+        let buffers: Arc<Mutex<HashMap<ConnectionId, RtuBuffer>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let role: Arc<Mutex<Option<ApplicationRole>>> = Arc::new(Mutex::new(None));
         let app = Arc::new(Self {
@@ -99,19 +175,16 @@ impl RtuApplicationLayer {
         let buffers_for_data = Arc::clone(&buffers);
         let framing_tx_for_data = framing_tx.clone();
         let framing_error_tx_for_data = framing_error_tx.clone();
-        let role_for_data = Arc::clone(&role);
         let app_for_data = Arc::clone(&app);
         let data_task = tokio::spawn(async move {
             loop {
                 match data_rx.recv().await {
                     Ok(event) => {
-                        let role_snapshot = *role_for_data.lock().unwrap();
                         process_data_event(
                             &app_for_data,
                             &buffers_for_data,
                             &framing_tx_for_data,
                             &framing_error_tx_for_data,
-                            role_snapshot,
                             event.data,
                             event.response,
                             event.connection,
@@ -211,45 +284,110 @@ pub(crate) fn compute_interval_ms(
 
 fn process_data_event(
     app: &Arc<RtuApplicationLayer>,
-    buffers: &Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
+    buffers: &Arc<Mutex<HashMap<ConnectionId, RtuBuffer>>>,
     framing_tx: &broadcast::Sender<Framing>,
     framing_error_tx: &broadcast::Sender<ModbusError>,
-    role: Option<ApplicationRole>,
     data: Vec<u8>,
     response: ResponseFn,
     connection: ConnectionId,
 ) {
     let mut guard = buffers.lock().unwrap();
-    let buffer = guard.entry(Arc::clone(&connection)).or_default();
-    buffer.extend_from_slice(&data);
+    let mut buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
 
-    let is_response = matches!(role, Some(ApplicationRole::Master));
+    // Loop-consume the inbound chunk into the fixed-size pool. If the pool
+    // fills, flush any complete frames first; if it is still full after
+    // flushing, emit a framing-error and reset.
+    let mut data_offset = 0;
+    while data_offset < data.len() {
+        let copied = buffer.extend_from_slice(&data[data_offset..]);
+        if copied == 0 {
+            // Pool is full — try to make room by flushing complete frames.
+            drop(guard);
+            flush_pool(
+                app,
+                buffers,
+                framing_tx,
+                framing_error_tx,
+                &connection,
+                &response,
+                false,
+            );
+            guard = buffers.lock().unwrap();
+            buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
+            if buffer.available() == 0 {
+                let _ = framing_error_tx.send(ModbusError::InvalidData);
+                buffer.clear();
+                data_offset = data.len(); // discard rest of chunk
+            }
+            continue;
+        }
+        data_offset += copied;
+    }
+
+    drop(guard);
+    flush_pool(
+        app,
+        buffers,
+        framing_tx,
+        framing_error_tx,
+        &connection,
+        &response,
+        false,
+    );
+}
+
+/// Flush complete frames from the per-connection pool. After extraction,
+/// compact the pool so unconsumed bytes are shifted to the front.
+fn flush_pool(
+    app: &Arc<RtuApplicationLayer>,
+    buffers: &Arc<Mutex<HashMap<ConnectionId, RtuBuffer>>>,
+    framing_tx: &broadcast::Sender<Framing>,
+    framing_error_tx: &broadcast::Sender<ModbusError>,
+    connection: &ConnectionId,
+    response: &ResponseFn,
+    _strict: bool,
+) {
+    let mut guard = buffers.lock().unwrap();
+    let buffer = match guard.get_mut(connection) {
+        Some(b) => b,
+        None => return,
+    };
+
+    let is_response = matches!(app.role_snapshot(), Some(ApplicationRole::Master));
     let custom_fcs = app.custom_function_codes.lock().unwrap().clone();
 
-    loop {
-        match try_extract(buffer, is_response, &custom_fcs) {
+    while !buffer.is_empty() {
+        match try_extract(buffer.as_slice(), is_response, &custom_fcs) {
             ExtractResult::Frame { skip, frame_len } => {
                 if skip > 0 {
-                    buffer.drain(..skip);
+                    buffer.drain(skip);
                 }
-                let frame_bytes: Vec<u8> = buffer.drain(..frame_len).collect();
+                let frame_bytes: Vec<u8> = buffer.as_slice()[..frame_len].to_vec();
+                buffer.drain(frame_len);
                 let adu = ApplicationDataUnit {
                     transaction: None,
                     unit: frame_bytes[0],
                     fc: frame_bytes[1],
                     data: frame_bytes[2..frame_bytes.len() - 2].to_vec(),
                 };
+                eprintln!("DEBUG flush_pool: sending frame unit={} fc={:02x} len={}", adu.unit, adu.fc, frame_bytes.len());
                 let _ = framing_tx.send(Framing {
                     adu,
                     raw: frame_bytes,
-                    response: Arc::clone(&response),
-                    connection: Arc::clone(&connection),
+                    response: Arc::clone(response),
+                    connection: Arc::clone(connection),
                 });
             }
             ExtractResult::Skip => {
-                buffer.drain(..1);
+                buffer.drain(1);
             }
-            ExtractResult::Insufficient => break,
+            ExtractResult::Insufficient => {
+                if buffer.len() >= MAX_FRAME_LENGTH {
+                    buffer.drain(1);
+                    continue;
+                }
+                break;
+            }
             ExtractResult::Invalid => {
                 let _ = framing_error_tx.send(ModbusError::InvalidData);
                 buffer.clear();
@@ -258,8 +396,9 @@ fn process_data_event(
         }
     }
 
+    buffer.compact();
     if buffer.is_empty() {
-        guard.remove(&connection);
+        guard.remove(connection);
     }
 }
 
