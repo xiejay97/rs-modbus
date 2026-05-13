@@ -74,6 +74,9 @@ struct RtuBuffer {
     pool: Box<[u8]>,
     start: usize,
     end: usize,
+    timer: Option<JoinHandle<()>>,
+    inter_char_timer: Option<JoinHandle<()>>,
+    t15_expired: bool,
 }
 
 impl RtuBuffer {
@@ -82,6 +85,9 @@ impl RtuBuffer {
             pool: vec![0u8; POOL_SIZE].into_boxed_slice(),
             start: 0,
             end: 0,
+            timer: None,
+            inter_char_timer: None,
+            t15_expired: false,
         }
     }
 
@@ -294,17 +300,38 @@ fn process_data_event(
     response: ResponseFn,
     connection: ConnectionId,
 ) {
+    let strict = app.interval_ms > 0;
+
     let mut guard = buffers.lock().unwrap();
     let mut buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
 
-    // Loop-consume the inbound chunk into the fixed-size pool. If the pool
-    // fills, flush any complete frames first; if it is still full after
-    // flushing, emit a framing-error and reset.
+    // t1.5 expiry from previous gap: if new data arrives after t1.5 fired,
+    // the in-progress frame is corrupt.
+    if buffer.t15_expired && buffer.len() > 0 {
+        buffer.start = 0;
+        buffer.end = 0;
+        buffer.t15_expired = false;
+        drop(guard);
+        let _ = framing_error_tx.send(ModbusError::T1_5Exceeded);
+        guard = buffers.lock().unwrap();
+        buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
+    } else {
+        buffer.t15_expired = false;
+    }
+
+    // Cancel pending timers — new data resets the silence window.
+    if let Some(t) = buffer.timer.take() {
+        t.abort();
+    }
+    if let Some(t) = buffer.inter_char_timer.take() {
+        t.abort();
+    }
+
+    // Loop-consume the inbound chunk into the fixed-size pool.
     let mut data_offset = 0;
     while data_offset < data.len() {
         let copied = buffer.extend_from_slice(&data[data_offset..]);
         if copied == 0 {
-            // Pool is full — try to make room by flushing complete frames.
             drop(guard);
             flush_pool(
                 app,
@@ -313,30 +340,80 @@ fn process_data_event(
                 framing_error_tx,
                 &connection,
                 &response,
-                false,
+                strict,
             );
             guard = buffers.lock().unwrap();
             buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
             if buffer.available() == 0 {
                 let _ = framing_error_tx.send(ModbusError::InvalidData);
                 buffer.clear();
-                data_offset = data.len(); // discard rest of chunk
+                data_offset = data.len();
             }
             continue;
         }
         data_offset += copied;
     }
 
+    let len_after = buffer.len();
     drop(guard);
-    flush_pool(
-        app,
-        buffers,
-        framing_tx,
-        framing_error_tx,
-        &connection,
-        &response,
-        false,
-    );
+
+    // Net mode: flush immediately. Serial mode: defer to t3.5 timer
+    // (or flush now if the pool is at capacity).
+    if app.interval_ms == 0 || len_after >= MAX_FRAME_LENGTH {
+        flush_pool(
+            app,
+            buffers,
+            framing_tx,
+            framing_error_tx,
+            &connection,
+            &response,
+            strict,
+        );
+    }
+
+    // Arm t3.5 / t1.5 timers for Serial transports.
+    if app.interval_ms > 0 && len_after < MAX_FRAME_LENGTH {
+        let interval = app.interval_ms;
+        let inter_char = app.inter_char_ms;
+        let buffers_t = Arc::clone(buffers);
+        let framing_tx_t = framing_tx.clone();
+        let framing_error_tx_t = framing_error_tx.clone();
+        let conn_t = Arc::clone(&connection);
+        let response_t = Arc::clone(&response);
+        let app_t = Arc::clone(app);
+
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(interval as u64)).await;
+            flush_pool(
+                &app_t,
+                &buffers_t,
+                &framing_tx_t,
+                &framing_error_tx_t,
+                &conn_t,
+                &response_t,
+                interval > 0,
+            );
+        });
+
+        let mut guard = buffers.lock().unwrap();
+        if let Some(b) = guard.get_mut(&connection) {
+            b.timer = Some(timer);
+
+            if inter_char > 0 {
+                let buffers_ic = Arc::clone(buffers);
+                let conn_ic = Arc::clone(&connection);
+                let inter_char_timer = tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(inter_char as u64))
+                        .await;
+                    let mut guard = buffers_ic.lock().unwrap();
+                    if let Some(b) = guard.get_mut(&conn_ic) {
+                        b.t15_expired = true;
+                    }
+                });
+                b.inter_char_timer = Some(inter_char_timer);
+            }
+        }
+    }
 }
 
 /// Flush complete frames from the per-connection pool. After extraction,
@@ -348,7 +425,7 @@ fn flush_pool(
     framing_error_tx: &broadcast::Sender<ModbusError>,
     connection: &ConnectionId,
     response: &ResponseFn,
-    _strict: bool,
+    strict: bool,
 ) {
     let mut guard = buffers.lock().unwrap();
     let buffer = match guard.get_mut(connection) {
@@ -373,7 +450,6 @@ fn flush_pool(
                     fc: frame_bytes[1],
                     data: frame_bytes[2..frame_bytes.len() - 2].to_vec(),
                 };
-                eprintln!("DEBUG flush_pool: sending frame unit={} fc={:02x} len={}", adu.unit, adu.fc, frame_bytes.len());
                 let _ = framing_tx.send(Framing {
                     adu,
                     raw: frame_bytes,
@@ -382,12 +458,33 @@ fn flush_pool(
                 });
             }
             ExtractResult::Skip => {
+                if strict {
+                    let _ = framing_error_tx.send(ModbusError::CrcCheckFailed);
+                    buffer.clear();
+                    break;
+                }
                 buffer.drain(1);
             }
             ExtractResult::Insufficient => {
                 if buffer.len() >= MAX_FRAME_LENGTH {
                     buffer.drain(1);
                     continue;
+                }
+                if strict {
+                    let err = if buffer.t15_expired {
+                        ModbusError::T1_5Exceeded
+                    } else {
+                        ModbusError::IncompleteFrame
+                    };
+                    let _ = framing_error_tx.send(err);
+                    buffer.clear();
+                    buffer.t15_expired = false;
+                    break;
+                }
+                if buffer.t15_expired {
+                    let _ = framing_error_tx.send(ModbusError::T1_5Exceeded);
+                    buffer.clear();
+                    buffer.t15_expired = false;
                 }
                 break;
             }

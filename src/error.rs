@@ -28,6 +28,10 @@ pub enum ModbusError {
     InvalidData,
     #[error("Invalid hex character")]
     InvalidHex,
+    #[error("Inter-character timeout (t1.5) exceeded")]
+    T1_5Exceeded,
+    #[error("Incomplete frame at t3.5")]
+    IncompleteFrame,
     #[error("Timeout")]
     Timeout,
     #[error("Port is not open")]
