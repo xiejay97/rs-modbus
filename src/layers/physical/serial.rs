@@ -3,17 +3,18 @@ use crate::layers::physical::{
     ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
 };
 use crate::utils::gen_connection_id;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub struct SerialPhysicalLayer {
     port: Arc<std::sync::Mutex<Option<Box<dyn serialport::SerialPort>>>>,
-    is_open: Arc<std::sync::Mutex<bool>>,
-    is_opening: Arc<std::sync::Mutex<bool>>,
-    is_destroyed: Arc<std::sync::Mutex<bool>>,
+    is_open: AtomicBool,
+    is_opening: AtomicBool,
+    is_destroyed: AtomicBool,
     path: String,
     baud_rate: u32,
-    connection_id: Arc<std::sync::Mutex<Option<ConnectionId>>>,
+    connection_id: std::sync::Mutex<Option<ConnectionId>>,
     data_tx: broadcast::Sender<DataEvent>,
     write_tx: broadcast::Sender<Vec<u8>>,
     error_tx: broadcast::Sender<ModbusError>,
@@ -30,12 +31,12 @@ impl SerialPhysicalLayer {
         let (close_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             port: Arc::new(std::sync::Mutex::new(None)),
-            is_open: Arc::new(std::sync::Mutex::new(false)),
-            is_opening: Arc::new(std::sync::Mutex::new(false)),
-            is_destroyed: Arc::new(std::sync::Mutex::new(false)),
+            is_open: AtomicBool::new(false),
+            is_opening: AtomicBool::new(false),
+            is_destroyed: AtomicBool::new(false),
             path,
             baud_rate,
-            connection_id: Arc::new(std::sync::Mutex::new(None)),
+            connection_id: std::sync::Mutex::new(None),
             data_tx,
             write_tx,
             error_tx,
@@ -56,22 +57,25 @@ impl PhysicalLayer for SerialPhysicalLayer {
     }
 
     async fn open(&self) -> Result<(), ModbusError> {
-        if *self.is_destroyed.lock().unwrap() {
+        if self.is_destroyed.load(Ordering::Acquire) {
             return Err(ModbusError::PortDestroyed);
         }
+        if self
+            .is_opening
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
-            let opened = self.is_open.lock().unwrap();
-            let opening = self.is_opening.lock().unwrap();
-            if *opened || *opening {
-                return Err(ModbusError::PortAlreadyOpen);
-            }
+            return Err(ModbusError::PortAlreadyOpen);
         }
-        *self.is_opening.lock().unwrap() = true;
+        if self.is_open.load(Ordering::Acquire) {
+            self.is_opening.store(false, Ordering::Release);
+            return Err(ModbusError::PortAlreadyOpen);
+        }
 
         let port = match serialport::new(&self.path, self.baud_rate).open() {
             Ok(p) => p,
             Err(e) => {
-                *self.is_opening.lock().unwrap() = false;
+                self.is_opening.store(false, Ordering::Release);
                 return Err(ModbusError::ConnectionError(e.to_string()));
             }
         };
@@ -147,37 +151,38 @@ impl PhysicalLayer for SerialPhysicalLayer {
             }
         });
 
-        *self.is_open.lock().unwrap() = true;
-        *self.is_opening.lock().unwrap() = false;
+        self.is_open.store(true, Ordering::Release);
+        self.is_opening.store(false, Ordering::Release);
         Ok(())
     }
 
     async fn write(&self, data: &[u8]) -> Result<(), ModbusError> {
-        if !*self.is_open.lock().unwrap() {
+        if !self.is_open.load(Ordering::Acquire) {
             return Err(ModbusError::PortNotOpen);
         }
-        if let Ok(mut guard) = self.port.lock() {
+        let port = Arc::clone(&self.port);
+        let data = data.to_vec();
+        let write_tx = self.write_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = port.lock().map_err(|_| {
+                ModbusError::ConnectionError("serial port poisoned".to_string())
+            })?;
             if let Some(ref mut port) = *guard {
                 use std::io::Write;
-                port.write_all(data)
+                port.write_all(&data)
                     .map_err(|e| ModbusError::ConnectionError(e.to_string()))?;
-                let _ = self.write_tx.send(data.to_vec());
+                let _ = write_tx.send(data);
                 Ok(())
             } else {
                 Err(ModbusError::PortNotOpen)
             }
-        } else {
-            Err(ModbusError::PortNotOpen)
-        }
+        })
+        .await
+        .map_err(|e| ModbusError::ConnectionError(e.to_string()))?
     }
 
     async fn close(&self) -> Result<(), ModbusError> {
-        let was_open = {
-            let mut g = self.is_open.lock().unwrap();
-            let prev = *g;
-            *g = false;
-            prev
-        };
+        let was_open = self.is_open.swap(false, Ordering::AcqRel);
         if !was_open {
             return Ok(());
         }
@@ -195,27 +200,18 @@ impl PhysicalLayer for SerialPhysicalLayer {
     }
 
     async fn destroy(&self) {
-        if *self.is_destroyed.lock().unwrap() {
+        if self.is_destroyed.swap(true, Ordering::AcqRel) {
             return;
         }
-        *self.is_destroyed.lock().unwrap() = true;
         let _ = self.close().await;
     }
 
     fn is_open(&self) -> bool {
-        if let Ok(guard) = self.is_open.lock() {
-            *guard
-        } else {
-            false
-        }
+        self.is_open.load(Ordering::Acquire)
     }
 
     fn is_destroyed(&self) -> bool {
-        if let Ok(guard) = self.is_destroyed.lock() {
-            *guard
-        } else {
-            false
-        }
+        self.is_destroyed.load(Ordering::Acquire)
     }
 
     fn subscribe_data(&self) -> broadcast::Receiver<DataEvent> {

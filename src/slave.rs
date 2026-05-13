@@ -369,6 +369,22 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
         let result = f().await;
         drop(guards);
+        drop(lock_arcs);
+
+        // Clean up entries whose Arc is no longer referenced outside the map.
+        // This prevents unbounded growth when writes touch many distinct
+        // addresses over the lifetime of the slave.
+        {
+            let mut locks = address_locks.lock().await;
+            for &addr in &sorted {
+                if let Some(arc) = locks.get(&addr) {
+                    if Arc::strong_count(arc) == 1 {
+                        locks.remove(&addr);
+                    }
+                }
+            }
+        }
+
         result
     }
 

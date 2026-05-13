@@ -167,17 +167,7 @@ fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
 #[async_trait::async_trait]
 impl ApplicationLayer for TcpApplicationLayer {
     fn set_role(&self, role: ApplicationRole) -> Result<(), ModbusError> {
-        let mut guard = self.role.lock().unwrap();
-        match *guard {
-            Some(existing) if existing == role => Ok(()),
-            Some(existing) => Err(ModbusError::InvalidState(format!(
-                "application layer role already set to {existing:?}, cannot change to {role:?}"
-            ))),
-            None => {
-                *guard = Some(role);
-                Ok(())
-            }
-        }
+        crate::layers::application::set_role_impl(&mut *self.role.lock().unwrap(), role)
     }
 
     fn role(&self) -> Option<ApplicationRole> {

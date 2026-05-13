@@ -14,6 +14,26 @@ pub enum ApplicationRole {
     Slave,
 }
 
+/// Shared implementation of [`ApplicationLayer::set_role`].
+///
+/// Returns `Ok(())` on first set or re-setting the same role.
+/// Returns `InvalidState` if a *different* role is already assigned.
+pub(crate) fn set_role_impl(
+    current: &mut Option<ApplicationRole>,
+    role: ApplicationRole,
+) -> Result<(), ModbusError> {
+    match *current {
+        Some(existing) if existing == role => Ok(()),
+        Some(existing) => Err(ModbusError::InvalidState(format!(
+            "application layer role already set to {existing:?}, cannot change to {role:?}"
+        ))),
+        None => {
+            *current = Some(role);
+            Ok(())
+        }
+    }
+}
+
 /// Wire protocol implemented by an [`ApplicationLayer`]. Exposed through
 /// [`ApplicationLayer::protocol`] so callers (master, slave, tests) can
 /// gate protocol-specific behavior — notably, `ModbusMaster` uses it to

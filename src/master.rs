@@ -4,7 +4,7 @@ use crate::layers::physical::PhysicalLayer;
 use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
 use crate::types::{ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId};
 use crate::utils::{parse_coils, parse_registers};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -40,7 +40,6 @@ pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
     pub timeout_ms: u64,
     pub concurrent: bool,
     next_tid: AtomicU16,
-    closed: AtomicBool,
     clean_level: AtomicU8,
     queue_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -87,7 +86,6 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             timeout_ms: options.timeout_ms,
             concurrent: options.concurrent,
             next_tid: AtomicU16::new(1),
-            closed: AtomicBool::new(false),
             clean_level: AtomicU8::new(0),
             queue_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(vec![framing_task, error_task]),
@@ -113,7 +111,6 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         if current == 1 && level == 1 {
             return;
         }
-        self.closed.store(true, Ordering::Release);
         let err = if level == 2 {
             ModbusError::InvalidState("Master destroyed".into())
         } else {
@@ -128,7 +125,6 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             return Err(ModbusError::PortDestroyed);
         }
         self.clean_level.store(0, Ordering::Release);
-        self.closed.store(false, Ordering::Release);
         self.next_tid.store(1, Ordering::Release);
         self.physical.open().await?;
         Ok(())
@@ -200,7 +196,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         // Reject up-front so a newly issued call after `close()` doesn't
         // hit the socket. Necessary in concurrent mode (no queue lock) and
         // also covers the rare case where a FIFO caller starts mid-close.
-        if self.closed.load(Ordering::Acquire) {
+        if self.clean_level.load(Ordering::Acquire) >= 1 {
             return Err(ModbusError::InvalidState("Master closed".into()));
         }
 
@@ -216,7 +212,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
 
         // A close() may have landed while we were waiting for the queue
         // lock. Re-check before allocating a TID / writing.
-        if self.closed.load(Ordering::Acquire) {
+        if self.clean_level.load(Ordering::Acquire) >= 1 {
             return Err(ModbusError::InvalidState("Master closed".into()));
         }
 
