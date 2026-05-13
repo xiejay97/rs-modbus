@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use rs_modbus::error::ModbusError;
 use rs_modbus::layers::application::ApplicationLayer;
 use rs_modbus::layers::application::{
-    AsciiApplicationLayer, RtuApplicationLayer, TcpApplicationLayer,
+    AsciiApplicationLayer, RtuApplicationLayer, RtuApplicationLayerOptions,
+    TcpApplicationLayer,
 };
 use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
@@ -259,7 +260,7 @@ async fn concurrent_mode_pipelines_5_in_flight_requests() {
 #[tokio::test]
 async fn concurrent_with_rtu_application_layer_panics() {
     let phy = TcpServerPhysicalLayer::new();
-    let app = RtuApplicationLayer::new(phy.clone(), None, None);
+    let app = RtuApplicationLayer::new(phy.clone(), RtuApplicationLayerOptions::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = ModbusSlave::with_options(
             app.clone(),

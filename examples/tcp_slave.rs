@@ -77,7 +77,7 @@ impl ModbusSlaveModel for SimpleModel {
 
     async fn report_server_id(&self) -> Result<ServerId, rs_modbus::error::ModbusError> {
         Ok(ServerId {
-            server_id: self.unit(),
+            server_id: vec![self.unit()],
             run_indicator_status: true,
             additional_data: vec![1, 2, 3],
         })

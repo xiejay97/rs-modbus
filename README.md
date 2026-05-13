@@ -130,6 +130,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Broadcasts (unit = 0)
+
+Slaves never respond to broadcast requests, so the master's write methods with `unit = 0`
+return as soon as the bytes are flushed to the wire.
+
+If you broadcast over serial (RTU or ASCII), per Modbus over Serial Line V1.02 §2.4.1
+you must wait a **turnaround delay** before sending the next request — slow slaves need
+time to apply the broadcast write that produced no response. The library does not insert
+this delay automatically because the right value is workload-specific (fast sensors vs.
+PLCs writing to flash differ by orders of magnitude). Insert it yourself at the call site:
+
+```rust
+master.write_single_register(0, 0, 0x1234, None).await?; // broadcast
+sleep(Duration::from_millis(100)).await;                   // turnaround — tune per devices
+master.write_single_register(1, 0, 0x5678, None).await?; // unicast to next slave
+```
+
+A safe lower bound is the RTU t3.5 inter-frame silence (e.g. ~4 ms at 9600 baud,
+~1.75 ms above 19200 baud). Many real-world PLCs need 50–100 ms after a broadcast write.
+Modbus TCP/UDP do not require this delay (TCP gives synchronous acks; broadcasting on TCP
+is uncommon anyway).
+
 ## License
 
 MIT

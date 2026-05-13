@@ -1,7 +1,7 @@
 use crate::error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
 use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
-use crate::types::{AddressRange, ApplicationDataUnit, FramedDataUnit, ServerId};
+use crate::types::{AddressRange, ApplicationDataUnit, CustomFunctionCode, FramedDataUnit, ServerId};
 use crate::utils::{check_range, pack_coils, pack_registers};
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -125,6 +125,7 @@ pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
+    custom_function_codes: Mutex<HashMap<u8, CustomFunctionCode>>,
 }
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P> {
@@ -151,6 +152,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             queues: Arc::new(Mutex::new(HashMap::new())),
             tasks: Mutex::new(Vec::new()),
             is_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            custom_function_codes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -178,6 +180,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         let application = Arc::clone(&self.application);
         let models = Arc::clone(&self.models);
         let queues = Arc::clone(&self.queues);
+        let custom_fcs: Arc<HashMap<u8, CustomFunctionCode>> =
+            Arc::new(self.custom_function_codes.lock().await.clone());
         let concurrent = self.concurrent;
         let is_open = Arc::clone(&self.is_open);
         let mut framing_rx = self.application.subscribe_framing();
@@ -197,8 +201,9 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                             // TID embedded in the response disambiguates.
                             let app = Arc::clone(&application);
                             let mdls = Arc::clone(&models);
+                            let cfs = Arc::clone(&custom_fcs);
                             tokio::spawn(async move {
-                                Self::process_frame(&app, &mdls, frame, framing.response).await;
+                                Self::process_frame(&app, &mdls, &cfs, frame, framing.response).await;
                             });
                         } else {
                             // Per-connection FIFO: push onto this
@@ -208,6 +213,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                                 Arc::clone(&queues),
                                 Arc::clone(&application),
                                 Arc::clone(&models),
+                                Arc::clone(&custom_fcs),
                                 framing.connection,
                                 frame,
                                 framing.response,
@@ -297,6 +303,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
         models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
         connection: ConnectionId,
         frame: FramedDataUnit,
         response: ResponseFn,
@@ -317,7 +324,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         };
         if should_spawn {
             tokio::spawn(async move {
-                Self::drain_loop(queues, application, models, connection).await;
+                Self::drain_loop(queues, application, models, custom_fcs, connection).await;
             });
         }
     }
@@ -331,6 +338,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
         models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
         connection: ConnectionId,
     ) {
         loop {
@@ -343,7 +351,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             };
             match next {
                 Some((frame, response)) => {
-                    Self::process_frame(&application, &models, frame, response).await;
+                    Self::process_frame(&application, &models, &custom_fcs, frame, response).await;
                 }
                 None => {
                     let mut g = queues.lock().await;
@@ -365,6 +373,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     async fn process_frame(
         application: &Arc<A>,
         models: &Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        custom_fcs: &HashMap<u8, CustomFunctionCode>,
         frame: FramedDataUnit,
         response_fn: ResponseFn,
     ) {
@@ -461,6 +470,35 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                         .await
                 }
                 _ => {
+                    if let Some(cfc) = custom_fcs.get(&frame.adu.fc) {
+                        if let Some(ref handler) = cfc.handle {
+                            let handler_clone: std::sync::Arc<dyn Fn(Vec<u8>, u8) -> crate::types::CustomFcHandleResult + Send + Sync> =
+                                Arc::clone(handler);
+                            let pdu = frame.adu.data.clone();
+                            match handler_clone(pdu, frame.adu.unit).await {
+                                Ok(response_data) => {
+                                    let response_adu = ApplicationDataUnit {
+                                        transaction: frame.adu.transaction,
+                                        unit: frame.adu.unit,
+                                        fc: frame.adu.fc,
+                                        data: response_data,
+                                    };
+                                    let _ = response(application.encode(&response_adu)).await;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    let _ = Self::response_error(
+                                        application,
+                                        &frame.adu,
+                                        Arc::clone(&response),
+                                        &e,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     Self::response_error(
                         application,
                         &frame.adu,
@@ -891,8 +929,27 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
         match model.report_server_id().await {
             Ok(server_id) => {
-                let mut data = vec![2 + server_id.additional_data.len() as u8];
-                data.push(server_id.server_id);
+                // Modbus V1.1b3 §6.17 leaves Server ID length device-specific
+                // (N bytes). Validate the assembled payload fits in a single
+                // byteCount byte before we serialize.
+                let server_id_bytes = if server_id.server_id.is_empty() {
+                    vec![model.unit()]
+                } else {
+                    server_id.server_id.clone()
+                };
+                let byte_count = server_id_bytes.len() + 1 + server_id.additional_data.len();
+                if byte_count > 255 {
+                    return Self::response_error(
+                        application,
+                        adu,
+                        response,
+                        &get_error_by_code(ErrorCode::ServerDeviceFailure),
+                    )
+                    .await;
+                }
+                let mut data = Vec::with_capacity(1 + byte_count);
+                data.push(byte_count as u8);
+                data.extend_from_slice(&server_id_bytes);
                 data.push(if server_id.run_indicator_status {
                     0xff
                 } else {
@@ -1176,5 +1233,15 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             }
             Err(e) => Self::response_error(application, adu, response, &e).await,
         }
+    }
+
+    pub async fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
+        self.application.add_custom_function_code(cfc.clone());
+        self.custom_function_codes.lock().await.insert(cfc.fc, cfc);
+    }
+
+    pub async fn remove_custom_function_code(&self, fc: u8) {
+        self.application.remove_custom_function_code(fc);
+        self.custom_function_codes.lock().await.remove(&fc);
     }
 }

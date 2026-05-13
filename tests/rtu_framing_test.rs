@@ -12,6 +12,7 @@
 
 use rs_modbus::layers::application::{
     ApplicationLayer, ApplicationRole, FrameInterval, RtuApplicationLayer,
+    RtuApplicationLayerOptions,
 };
 use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::utils::crc;
@@ -40,7 +41,7 @@ async fn setup() -> (
     server.open().await.unwrap();
     let addr = server.get_addr().await.unwrap();
     // RTU layer bound to Net transport (no inter-frame timer).
-    let application = RtuApplicationLayer::new(server.clone(), None, None);
+    let application = RtuApplicationLayer::new(server.clone(), RtuApplicationLayerOptions::default());
     application.set_role(ApplicationRole::Slave).unwrap();
     sleep(Duration::from_millis(30)).await;
 
@@ -170,13 +171,32 @@ async fn test_rtu_framing_error_on_bad_crc_then_recovers() {
 async fn test_rtu_compute_interval_ms_via_constructor_net() {
     // For Net transports the interval is always 0 regardless of inputs.
     let physical = TcpClientPhysicalLayer::new();
-    let app = RtuApplicationLayer::new(physical.clone(), Some(9600), None);
+    let app = RtuApplicationLayer::new(
+        physical.clone(),
+        RtuApplicationLayerOptions {
+            baud_rate: Some(9600),
+            ..Default::default()
+        },
+    );
     // The `interval_ms` field is private; we exercise it via constructor not
     // panicking with various inputs.
     let _ = app;
-    let app2 =
-        RtuApplicationLayer::new(physical.clone(), Some(9600), Some(FrameInterval::Bits(96)));
+    let app2 = RtuApplicationLayer::new(
+        physical.clone(),
+        RtuApplicationLayerOptions {
+            baud_rate: Some(9600),
+            interval_between_frames: Some(FrameInterval::Bits(96.0)),
+            ..Default::default()
+        },
+    );
     let _ = app2;
-    let app3 = RtuApplicationLayer::new(physical, Some(115200), Some(FrameInterval::Ms(7)));
+    let app3 = RtuApplicationLayer::new(
+        physical,
+        RtuApplicationLayerOptions {
+            baud_rate: Some(115200),
+            interval_between_frames: Some(FrameInterval::Ms(7)),
+            ..Default::default()
+        },
+    );
     let _ = app3;
 }

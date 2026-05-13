@@ -1,3 +1,4 @@
+use crate::vars::{FunctionCode, EXCEPTION_OFFSET, MEI_READ_DEVICE_ID};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,7 +64,26 @@ pub fn check_range(value: &[u16], range: &[(u16, u16)]) -> bool {
 }
 
 pub fn get_three_point_five_t(baud_rate: u32, approximation: u32) -> f64 {
-    (approximation as f64 * 1000.0) / baud_rate as f64
+    bits_to_ms(baud_rate, approximation as f64)
+}
+
+/// Convert a number of bits to milliseconds at the given baud rate.
+///
+/// Mirrors njs-modbus `bitsToMs`. Used to derive Modbus RTU timing intervals
+/// from bit counts — e.g. 38.5 bits = 3.5 character times at 11 bits/char (t3.5
+/// inter-frame silence), or 16.5 bits = 1.5 character times (t1.5
+/// inter-character timeout), per Modbus V1.02 §2.5.1.1.
+pub fn bits_to_ms(baud_rate: u32, bits: f64) -> f64 {
+    (bits * 1000.0) / baud_rate as f64
+}
+
+/// Returns true when `n` is in the unsigned-byte range `[0, 255]`.
+///
+/// Mirrors njs-modbus `isUint8`. Used for byte-level Modbus payload
+/// validation (FC17 server-ID elements, FC43 object values, custom-FC
+/// payloads).
+pub fn is_uint8(n: i32) -> bool {
+    (0..=255).contains(&n)
 }
 
 pub fn pack_coils(coils: &[bool], length: u16) -> Vec<u8> {
@@ -116,22 +136,54 @@ pub fn parse_registers(data: &[u8], length: u16) -> Vec<u16> {
     result
 }
 
+/// Predictor result mirroring njs-modbus `PredictResult` discriminated union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredictResult {
+    /// Function code is known and total RTU frame length (PDU + 2-byte CRC) is determined.
+    Length(usize),
+    /// Function code is known, but more bytes are required to decide
+    /// (typically waiting on the byteCount byte or a variable-length tail).
+    NeedMore,
+    /// Function code is not in the standard tables — caller must defer to a
+    /// registered `CustomFunctionCode` or treat this as a framing error.
+    Unknown,
+}
+
+/// True when `fc` has a built-in framing predictor (standard FC, exception, or
+/// FC 0x2B response).
+pub fn is_standard_fc(fc: u8, is_response: bool) -> bool {
+    if is_response && (fc & EXCEPTION_OFFSET) != 0 {
+        return true;
+    }
+    if is_response {
+        matches!(
+            fc,
+            0x05 | 0x06 | 0x0f | 0x10 | 0x16 | 0x01 | 0x02 | 0x03 | 0x04 | 0x11 | 0x17 | 0x2b
+        )
+    } else {
+        matches!(
+            fc,
+            0x01..=0x06 | 0x11 | 0x16 | 0x2b | 0x0f | 0x10 | 0x17
+        )
+    }
+}
+
 /// Predict the total RTU frame length (PDU + 2-byte CRC) given the leading bytes.
 ///
-/// Returns `None` when:
-/// - The buffer is too short to identify the function code or read a byteCount.
-/// - The function code is unknown or has a variable-length response that cannot
-///   be predicted from leading bytes (FC 43/14 responses).
-///
-/// Callers must fall back to a sliding-window CRC scan when `None` is returned.
-pub fn predict_rtu_frame_length(buffer: &[u8], is_response: bool) -> Option<usize> {
+/// Mirrors njs-modbus `predictRtuFrameLength` after the `PredictResult`
+/// refactor. Returns:
+/// - `Length(n)` — fc is known and length is determined.
+/// - `NeedMore` — fc is known but more bytes are required.
+/// - `Unknown` — fc is not in the standard tables; caller must consult any
+///   registered `CustomFunctionCode` or treat as a framing error.
+pub fn predict_rtu_frame_length(buffer: &[u8], is_response: bool) -> PredictResult {
     if buffer.len() < 2 {
-        return None;
+        return PredictResult::NeedMore;
     }
     let fc = buffer[1];
 
-    if is_response && (fc & 0x80) != 0 {
-        return Some(5);
+    if is_response && (fc & EXCEPTION_OFFSET) != 0 {
+        return PredictResult::Length(5);
     }
 
     let fixed = if is_response {
@@ -150,25 +202,59 @@ pub fn predict_rtu_frame_length(buffer: &[u8], is_response: bool) -> Option<usiz
         }
     };
     if let Some(n) = fixed {
-        return Some(n);
+        return PredictResult::Length(n);
     }
 
-    let (offset, extra) = if is_response {
+    let byte_count = if is_response {
         match fc {
-            0x01 | 0x02 | 0x03 | 0x04 | 0x11 | 0x17 => (2usize, 5usize),
-            _ => return None,
+            0x01 | 0x02 | 0x03 | 0x04 | 0x11 | 0x17 => Some((2usize, 5usize)),
+            _ => None,
         }
     } else {
         match fc {
-            0x0f | 0x10 => (6usize, 9usize),
-            0x17 => (10, 13),
-            _ => return None,
+            0x0f | 0x10 => Some((6usize, 9usize)),
+            0x17 => Some((10, 13)),
+            _ => None,
         }
     };
-    if buffer.len() <= offset {
-        return None;
+    if let Some((offset, extra)) = byte_count {
+        if buffer.len() <= offset {
+            return PredictResult::NeedMore;
+        }
+        return PredictResult::Length(extra + buffer[offset] as usize);
     }
-    Some(extra + buffer[offset] as usize)
+
+    if is_response && fc == FunctionCode::ReadDeviceIdentification.as_u8() {
+        return predict_fc43_14_response(buffer);
+    }
+
+    PredictResult::Unknown
+}
+
+/// Walk the variable-length FC 0x2B / MEI 0x0E (Read Device Identification)
+/// response structure per Modbus V1.1b3 §6.21.
+///
+/// Layout (after unit and fc):
+///   mei(1) rdic(1) conformity(1) more(1) nextObjId(1) numObjs(1)
+///   [objId(1) objLen(1) objData(objLen)] × numObjs
+///   CRC(2)
+fn predict_fc43_14_response(buffer: &[u8]) -> PredictResult {
+    if buffer.len() < 8 {
+        return PredictResult::NeedMore;
+    }
+    if buffer[2] != MEI_READ_DEVICE_ID {
+        return PredictResult::Unknown;
+    }
+    let num_objs = buffer[7] as usize;
+    let mut offset = 8usize;
+    for _ in 0..num_objs {
+        if buffer.len() < offset + 2 {
+            return PredictResult::NeedMore;
+        }
+        let obj_len = buffer[offset + 1] as usize;
+        offset += 2 + obj_len;
+    }
+    PredictResult::Length(offset + 2)
 }
 
 static CONNECTION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -330,9 +416,12 @@ mod tests {
     // ===== predict_rtu_frame_length =====
 
     #[test]
-    fn test_predict_buffer_too_short_returns_none() {
-        assert_eq!(predict_rtu_frame_length(&[], false), None);
-        assert_eq!(predict_rtu_frame_length(&[0x01], false), None);
+    fn test_predict_buffer_too_short_need_more() {
+        assert_eq!(predict_rtu_frame_length(&[], false), PredictResult::NeedMore);
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01], false),
+            PredictResult::NeedMore
+        );
     }
 
     #[test]
@@ -340,7 +429,7 @@ mod tests {
         for fc in [0x01u8, 0x02, 0x03, 0x04, 0x05, 0x06] {
             assert_eq!(
                 predict_rtu_frame_length(&[0x01, fc], false),
-                Some(8),
+                PredictResult::Length(8),
                 "request fc=0x{:02x} should predict 8",
                 fc
             );
@@ -349,56 +438,80 @@ mod tests {
 
     #[test]
     fn test_predict_request_fc17_fixed_4() {
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x11], false), Some(4));
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x11], false),
+            PredictResult::Length(4)
+        );
     }
 
     #[test]
     fn test_predict_request_fc22_fixed_10() {
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x16], false), Some(10));
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x16], false),
+            PredictResult::Length(10)
+        );
     }
 
     #[test]
     fn test_predict_request_fc43_fixed_7() {
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x2b], false), Some(7));
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x2b], false),
+            PredictResult::Length(7)
+        );
     }
 
     #[test]
     fn test_predict_request_fc15_byte_count() {
-        // fc=0x0f request: offset=6 (byteCount), extra=9
-        // bytes: unit fc addr1 addr2 qty1 qty2 byteCount ... + 2 CRC = 9 + byteCount
         let buf = [0x01u8, 0x0f, 0x00, 0x00, 0x00, 0x0a, 0x02];
-        assert_eq!(predict_rtu_frame_length(&buf, false), Some(11));
+        assert_eq!(
+            predict_rtu_frame_length(&buf, false),
+            PredictResult::Length(11)
+        );
     }
 
     #[test]
     fn test_predict_request_fc16_byte_count() {
-        // fc=0x10 request: offset=6, extra=9
         let buf = [0x01u8, 0x10, 0x00, 0x00, 0x00, 0x02, 0x04];
-        assert_eq!(predict_rtu_frame_length(&buf, false), Some(13));
+        assert_eq!(
+            predict_rtu_frame_length(&buf, false),
+            PredictResult::Length(13)
+        );
     }
 
     #[test]
     fn test_predict_request_fc23_byte_count() {
-        // fc=0x17 request: offset=10, extra=13
         let buf = [
             0x01u8, 0x17, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x01, 0x02,
         ];
-        assert_eq!(predict_rtu_frame_length(&buf, false), Some(15));
+        assert_eq!(
+            predict_rtu_frame_length(&buf, false),
+            PredictResult::Length(15)
+        );
     }
 
     #[test]
     fn test_predict_request_byte_count_buffer_too_short() {
-        // fc=0x0f offset=6, buffer length=6 → cannot read byteCount
         let buf = [0x01u8, 0x0f, 0x00, 0x00, 0x00, 0x0a];
-        assert_eq!(predict_rtu_frame_length(&buf, false), None);
+        assert_eq!(
+            predict_rtu_frame_length(&buf, false),
+            PredictResult::NeedMore
+        );
     }
 
     #[test]
     fn test_predict_response_exception_returns_5() {
-        // Any response with fc & 0x80 = exception, length is 5 (unit + fc + code + crc[2])
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x83], true), Some(5));
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x90], true), Some(5));
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0xab], true), Some(5));
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x83], true),
+            PredictResult::Length(5)
+        );
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x90], true),
+            PredictResult::Length(5)
+        );
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0xab], true),
+            PredictResult::Length(5)
+        );
     }
 
     #[test]
@@ -406,7 +519,7 @@ mod tests {
         for fc in [0x05u8, 0x06, 0x0f, 0x10] {
             assert_eq!(
                 predict_rtu_frame_length(&[0x01, fc], true),
-                Some(8),
+                PredictResult::Length(8),
                 "response fc=0x{:02x} should predict 8",
                 fc
             );
@@ -415,18 +528,19 @@ mod tests {
 
     #[test]
     fn test_predict_response_fc22_fixed_10() {
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x16], true), Some(10));
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x16], true),
+            PredictResult::Length(10)
+        );
     }
 
     #[test]
     fn test_predict_response_fc1_2_3_4_byte_count() {
-        // response offset=2, extra=5
-        // unit fc byteCount data... crc[2] = 5 + byteCount
         for fc in [0x01u8, 0x02, 0x03, 0x04] {
             let buf = [0x01u8, fc, 0x04, 0x00, 0x00, 0x00, 0x00];
             assert_eq!(
                 predict_rtu_frame_length(&buf, true),
-                Some(9),
+                PredictResult::Length(9),
                 "response fc=0x{:02x} byte_count=4 should predict 9",
                 fc
             );
@@ -436,35 +550,137 @@ mod tests {
     #[test]
     fn test_predict_response_fc17_byte_count() {
         let buf = [0x01u8, 0x11, 0x03];
-        assert_eq!(predict_rtu_frame_length(&buf, true), Some(8));
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::Length(8)
+        );
     }
 
     #[test]
     fn test_predict_response_fc23_byte_count() {
         let buf = [0x01u8, 0x17, 0x04];
-        assert_eq!(predict_rtu_frame_length(&buf, true), Some(9));
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::Length(9)
+        );
     }
 
     #[test]
     fn test_predict_response_byte_count_buffer_too_short() {
-        // response fc=0x03 offset=2, buffer length=2 → no byteCount yet
         let buf = [0x01u8, 0x03];
-        assert_eq!(predict_rtu_frame_length(&buf, true), None);
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::NeedMore
+        );
     }
 
     #[test]
-    fn test_predict_unknown_fc_returns_none() {
-        // Unknown function codes should return None (caller falls back to sliding scan)
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x99], false), None);
-        // FC43 response is variable-length and not predictable from leading bytes
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x2b], true), None);
+    fn test_predict_unknown_fc_returns_unknown() {
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x99], false),
+            PredictResult::Unknown
+        );
     }
 
     #[test]
     fn test_predict_request_exception_path_not_taken() {
         // In a request, fc with high bit set is NOT treated as exception
         // (only responses use that path)
-        assert_eq!(predict_rtu_frame_length(&[0x01, 0x83], false), None);
+        assert_eq!(
+            predict_rtu_frame_length(&[0x01, 0x83], false),
+            PredictResult::Unknown
+        );
+    }
+
+    // ===== predict_rtu_frame_length: FC 0x2B response (MEI 0x0E) =====
+
+    #[test]
+    fn test_predict_fc43_response_needs_at_least_8_bytes() {
+        for buf in &[
+            &[][..],
+            &[0x01],
+            &[0x01, 0x2b],
+            &[0x01, 0x2b, 0x0e, 0x01, 0x83, 0x00, 0x00],
+        ] {
+            assert_eq!(
+                predict_rtu_frame_length(buf, true),
+                PredictResult::NeedMore,
+                "buf len {} should be NeedMore",
+                buf.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_fc43_response_unsupported_mei_is_unknown() {
+        // MEI != 0x0E (e.g. CANopen 0x0D) — not handled by built-in predictor.
+        let buf = [0x01u8, 0x2b, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::Unknown
+        );
+    }
+
+    #[test]
+    fn test_predict_fc43_response_zero_objects() {
+        // unit fc mei rdic conformity more nextId numObjs=0 [+ CRC(2)]
+        let buf = [0x01u8, 0x2b, 0x0e, 0x01, 0x81, 0x00, 0x00, 0x00];
+        // No objects, total length = 8 + 2 = 10
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::Length(10)
+        );
+    }
+
+    #[test]
+    fn test_predict_fc43_response_one_object() {
+        // 1 object: id=0x00, len=4, data="abcd"
+        let buf = [
+            0x01u8, 0x2b, 0x0e, 0x01, 0x81, 0x00, 0x00, 0x01, 0x00, 0x04, b'a', b'b', b'c', b'd',
+        ];
+        // 8 header + (2 + 4) object + 2 CRC = 16
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::Length(16)
+        );
+    }
+
+    #[test]
+    fn test_predict_fc43_response_object_tail_missing_is_need_more() {
+        // numObjs=1 declared, but only header + object-id present
+        let buf = [0x01u8, 0x2b, 0x0e, 0x01, 0x81, 0x00, 0x00, 0x01, 0x00];
+        assert_eq!(
+            predict_rtu_frame_length(&buf, true),
+            PredictResult::NeedMore
+        );
+    }
+
+    // ===== is_standard_fc =====
+
+    #[test]
+    fn test_is_standard_fc_known_request() {
+        assert!(is_standard_fc(0x03, false));
+        assert!(is_standard_fc(0x0f, false));
+        assert!(is_standard_fc(0x2b, false));
+    }
+
+    #[test]
+    fn test_is_standard_fc_known_response() {
+        assert!(is_standard_fc(0x03, true));
+        assert!(is_standard_fc(0x2b, true));
+    }
+
+    #[test]
+    fn test_is_standard_fc_exception_response() {
+        assert!(is_standard_fc(0x83, true));
+        assert!(is_standard_fc(0xab, true));
+    }
+
+    #[test]
+    fn test_is_standard_fc_unknown_returns_false() {
+        assert!(!is_standard_fc(0x65, false));
+        // 0x64 has high bit clear and is not a known FC → false.
+        assert!(!is_standard_fc(0x64, true));
     }
 
     // ===== gen_connection_id =====

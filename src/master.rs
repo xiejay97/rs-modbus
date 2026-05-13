@@ -2,7 +2,7 @@ use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::PhysicalLayer;
 use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
-use crate::types::{ApplicationDataUnit, DeviceIdentification, DeviceObject, ServerId};
+use crate::types::{ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId};
 use crate::utils::{parse_coils, parse_registers};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
@@ -581,6 +581,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
     pub async fn report_server_id(
         &self,
         unit: u8,
+        server_id_length: usize,
         timeout_ms: Option<u64>,
     ) -> Result<Option<ServerId>, ModbusError> {
         let fc = 0x11;
@@ -591,7 +592,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
                 &request,
                 vec![
                     Self::check_unit_fc(unit, fc),
-                    Arc::new(|f: &Framing| {
+                    Arc::new(move |f: &Framing| {
                         if !f.adu.data.is_empty() {
                             let len = 1 + f.adu.data[0] as usize;
                             PreCheckOutcome::NeedLength(len)
@@ -605,11 +606,17 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(ServerId {
-                server_id: f.adu.data[1],
-                run_indicator_status: f.adu.data[2] == 0xff,
-                additional_data: f.adu.data[3..].to_vec(),
-            })),
+            Some(f) => {
+                let run_status_index = 1 + server_id_length;
+                if f.adu.data.len() < run_status_index + 1 {
+                    return Err(ModbusError::InvalidResponse);
+                }
+                Ok(Some(ServerId {
+                    server_id: f.adu.data[1..run_status_index].to_vec(),
+                    run_indicator_status: f.adu.data[run_status_index] == 0xff,
+                    additional_data: f.adu.data[run_status_index + 1..].to_vec(),
+                }))
+            }
             None => Ok(None),
         }
     }
@@ -762,6 +769,42 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
                     objects,
                 }))
             }
+            None => Ok(None),
+        }
+    }
+
+    pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
+        self.application.add_custom_function_code(cfc);
+    }
+
+    pub fn remove_custom_function_code(&self, fc: u8) {
+        self.application.remove_custom_function_code(fc);
+    }
+
+    /// Send a non-standard / custom function code request. The master only
+    /// validates that the response has matching `unit` and `fc`; any payload
+    /// is returned as raw bytes. The caller must have registered a
+    /// [`CustomFunctionCode`] with `predict_response_length` on the
+    /// application layer (or on this master) so RTU framing can advance.
+    ///
+    /// `unit == 0` is broadcast: returns `Ok(None)` after the write.
+    pub async fn send_custom_fc(
+        &self,
+        unit: u8,
+        fc: u8,
+        data: Vec<u8>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<Vec<u8>>, ModbusError> {
+        let request = ApplicationDataUnit::new(unit, fc, data);
+        let frame = self
+            .wait_response(
+                &request,
+                vec![Self::check_unit_fc(unit, fc)],
+                timeout_ms.unwrap_or(self.timeout_ms),
+            )
+            .await?;
+        match frame {
+            Some(f) => Ok(Some(f.adu.data)),
             None => Ok(None),
         }
     }

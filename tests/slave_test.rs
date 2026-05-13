@@ -132,7 +132,7 @@ impl ModbusSlaveModel for TestModel {
 
     async fn report_server_id(&self) -> Result<ServerId, rs_modbus::error::ModbusError> {
         Ok(ServerId {
-            server_id: self.unit,
+            server_id: vec![self.unit],
             run_indicator_status: true,
             additional_data: vec![1, 2, 3],
         })
@@ -359,8 +359,8 @@ async fn test_fc17_report_server_id() {
     let (slave, server, _coils, _di, _hr, _ir) = create_slave().await;
     let master = create_master(&server).await;
 
-    let res = master.report_server_id(UNIT, None).await.unwrap().unwrap();
-    assert_eq!(res.server_id, UNIT);
+    let res = master.report_server_id(UNIT, 1, None).await.unwrap().unwrap();
+    assert_eq!(res.server_id, vec![UNIT]);
     assert!(res.run_indicator_status);
     assert_eq!(res.additional_data, vec![1, 2, 3]);
 

@@ -1,6 +1,6 @@
 use crate::error::ModbusError;
 use crate::layers::physical::{ConnectionId, ResponseFn};
-use crate::types::{ApplicationDataUnit, FramedDataUnit};
+use crate::types::{ApplicationDataUnit, CustomFunctionCode, FramedDataUnit};
 use tokio::sync::broadcast;
 
 /// Application-layer role. Set by [`ModbusMaster`] / [`ModbusSlave`] when they
@@ -71,6 +71,13 @@ pub trait ApplicationLayer: Send + Sync {
     /// header, etc.). One error per offending physical-layer chunk.
     fn subscribe_framing_error(&self) -> broadcast::Receiver<ModbusError>;
 
+    /// Register a custom function code predictor. Default is a no-op; only
+    /// [`RtuApplicationLayer`] overrides this with real behavior.
+    fn add_custom_function_code(&self, _cfc: CustomFunctionCode) {}
+
+    /// Remove a previously registered custom function code. Default is a no-op.
+    fn remove_custom_function_code(&self, _fc: u8) {}
+
     /// Release task handles and drop physical-layer subscriptions.
     async fn destroy(&self);
 }
@@ -80,7 +87,7 @@ mod rtu;
 mod tcp;
 
 pub use ascii::{AsciiApplicationLayer, AsciiApplicationLayerOptions};
-pub use rtu::{FrameInterval, RtuApplicationLayer};
+pub use rtu::{FrameInterval, RtuApplicationLayer, RtuApplicationLayerOptions};
 pub use tcp::TcpApplicationLayer;
 
 #[cfg(test)]
@@ -131,7 +138,7 @@ mod tests {
         // RTU bound to a TCP-like (Net) physical: no inter-frame timer is
         // needed and decode is stateless in this commit.
         let physical = TcpClientPhysicalLayer::new();
-        RtuApplicationLayer::new(physical, None, None)
+        RtuApplicationLayer::new(physical, RtuApplicationLayerOptions::default())
     }
 
     fn make_ascii_app() -> Arc<AsciiApplicationLayer> {

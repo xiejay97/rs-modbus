@@ -6,7 +6,8 @@
 use async_trait::async_trait;
 use rs_modbus::error::ModbusError;
 use rs_modbus::layers::application::{
-    AsciiApplicationLayer, RtuApplicationLayer, TcpApplicationLayer,
+    AsciiApplicationLayer, RtuApplicationLayer, RtuApplicationLayerOptions,
+    TcpApplicationLayer,
 };
 use rs_modbus::layers::physical::{TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
@@ -99,7 +100,7 @@ async fn create_master(
 #[tokio::test]
 async fn concurrent_rejects_rtu_application_layer() {
     let phy = TcpClientPhysicalLayer::new();
-    let app = RtuApplicationLayer::new(phy.clone(), None, None);
+    let app = RtuApplicationLayer::new(phy.clone(), RtuApplicationLayerOptions::default());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = ModbusMaster::new(
             app.clone(),

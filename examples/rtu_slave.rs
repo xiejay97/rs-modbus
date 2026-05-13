@@ -2,7 +2,7 @@
 #[cfg(feature = "serial")]
 use async_trait::async_trait;
 #[cfg(feature = "serial")]
-use rs_modbus::layers::application::RtuApplicationLayer;
+use rs_modbus::layers::application::{RtuApplicationLayer, RtuApplicationLayerOptions};
 #[cfg(feature = "serial")]
 use rs_modbus::layers::physical::SerialPhysicalLayer;
 #[cfg(feature = "serial")]
@@ -89,7 +89,7 @@ impl ModbusSlaveModel for SimpleModel {
 
     async fn report_server_id(&self) -> Result<ServerId, rs_modbus::error::ModbusError> {
         Ok(ServerId {
-            server_id: self.unit(),
+            server_id: vec![self.unit()],
             run_indicator_status: true,
             additional_data: vec![1, 2, 3],
         })
@@ -111,7 +111,13 @@ impl ModbusSlaveModel for SimpleModel {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
     let physical = SerialPhysicalLayer::new("COM1".to_string(), 9600);
-    let application = RtuApplicationLayer::new(physical.clone(), Some(9600), None);
+    let application = RtuApplicationLayer::new(
+        physical.clone(),
+        RtuApplicationLayerOptions {
+            baud_rate: Some(9600),
+            ..Default::default()
+        },
+    );
     let slave = ModbusSlave::new(application, physical);
 
     let model = SimpleModel::new();

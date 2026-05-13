@@ -116,6 +116,7 @@ pub mod master_session;
 pub mod slave;
 pub mod types;
 pub mod utils;
+pub mod vars;
 
 // Re-export commonly used types for convenience
 pub use error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
@@ -125,5 +126,10 @@ pub use master::{ModbusMaster, ModbusMasterOptions};
 pub use master_session::{MasterSession, PreCheck, PreCheckOutcome};
 pub use slave::{ModbusSlave, ModbusSlaveModel, ModbusSlaveOptions};
 pub use types::{
-    AddressRange, ApplicationDataUnit, DeviceIdentification, DeviceObject, FramedDataUnit, ServerId,
+    AddressRange, ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject,
+    FramedDataUnit, ServerId,
+};
+pub use vars::{
+    limits, ConformityLevel, FunctionCode, ReadDeviceIdCode, COIL_OFF, COIL_ON, EXCEPTION_OFFSET,
+    MEI_READ_DEVICE_ID,
 };

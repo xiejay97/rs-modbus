@@ -1,8 +1,8 @@
 use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
-use crate::types::{ApplicationDataUnit, FramedDataUnit};
-use crate::utils::{crc, crc_with_seed, predict_rtu_frame_length};
+use crate::types::{ApplicationDataUnit, CustomFcPredict, CustomFunctionCode, FramedDataUnit};
+use crate::utils::{crc, predict_rtu_frame_length, PredictResult};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -15,10 +15,32 @@ const MIN_FRAME_LENGTH: usize = 4;
 /// `intervalBetweenFrames?: { unit: 'bit' | 'ms'; value: number }`.
 #[derive(Clone, Copy, Debug)]
 pub enum FrameInterval {
-    /// Number of bit-times used as the 3.5T approximation. njs default is 48.
-    Bits(u32),
+    /// Number of bit-times used as the 3.5T approximation.
+    Bits(f64),
     /// Direct millisecond override.
     Ms(u32),
+}
+
+/// Options for [`RtuApplicationLayer`]. Mirrors njs-modbus
+/// `RtuApplicationLayerOptions`.
+///
+/// **Breaking change (v2)**: the constructor no longer takes separate
+/// positional arguments; all timing parameters live here.
+#[derive(Clone, Copy, Debug)]
+pub struct RtuApplicationLayerOptions {
+    pub interval_between_frames: Option<FrameInterval>,
+    pub inter_char_timeout: Option<FrameInterval>,
+    pub baud_rate: Option<u32>,
+}
+
+impl Default for RtuApplicationLayerOptions {
+    fn default() -> Self {
+        Self {
+            interval_between_frames: None,
+            inter_char_timeout: None,
+            baud_rate: None,
+        }
+    }
 }
 
 pub struct RtuApplicationLayer {
@@ -27,33 +49,35 @@ pub struct RtuApplicationLayer {
     framing_error_tx: broadcast::Sender<ModbusError>,
     buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// User-defined predictors for non-standard FCs.
+    custom_function_codes: Mutex<HashMap<u8, CustomFunctionCode>>,
     /// Computed millisecond timeout for the 3.5T inter-frame gap. `0` on Net
-    /// transports. Currently unused at runtime (frame extraction is purely
-    /// driven by data arrival and CRC), kept for future timer-based flush.
-    #[allow(dead_code)]
+    /// transports.
     interval_ms: u32,
+    /// Computed millisecond timeout for the t1.5 inter-character gap.
+    /// `0` when disabled.
+    inter_char_ms: u32,
 }
+
 
 impl RtuApplicationLayer {
     /// Build an RTU application layer bound to `physical`.
     ///
-    /// `baud_rate` is required when `physical.layer_type() == Serial` and
-    /// `interval_between_frames` is `None` (so the layer can compute 3.5T from
-    /// it). For network transports it is ignored.
-    ///
-    /// `interval_between_frames` overrides the default 3.5T computation:
-    /// - `Some(FrameInterval::Ms(n))` — use `n` ms directly.
-    /// - `Some(FrameInterval::Bits(n))` — use `n` bit-times instead of 48.
-    /// - `None` on serial: 2 ms when `baud_rate > 19200`, else
-    ///   `ceil((48 * 1000) / baud_rate)`.
-    /// - `None` on net: 0 (flush every chunk immediately).
+    /// Options (all optional; see [`RtuApplicationLayerOptions`] for defaults):
+    /// - `interval_between_frames` — overrides the default 3.5T computation.
+    ///   * `FrameInterval::Bits(n)` — `n` bit-times (default 38.5 = 3.5 char times).
+    ///   * `FrameInterval::Ms(n)` — explicit milliseconds.
+    ///   * On serial with `None`: baud > 19200 → 1.75 ms (spec fix), else
+    ///     `ceil((38.5 * 1000) / baud)`.
+    /// - `inter_char_timeout` — opt-in t1.5. Disabled by default. Same units.
+    ///   On serial: baud > 19200 → 0.75 ms, else `ceil((16.5 * 1000) / baud)`.
+    /// - `baud_rate` — defaults to 9600 for Serial. Ignored on Net.
     pub fn new<P: PhysicalLayer + 'static>(
         physical: Arc<P>,
-        baud_rate: Option<u32>,
-        interval_between_frames: Option<FrameInterval>,
+        options: RtuApplicationLayerOptions,
     ) -> Arc<Self> {
-        let interval_ms =
-            compute_interval_ms(physical.layer_type(), baud_rate, interval_between_frames);
+        let (interval_ms, inter_char_ms) =
+            compute_interval_ms(physical.layer_type(), options);
 
         let (framing_tx, _) = broadcast::channel(64);
         let (framing_error_tx, _) = broadcast::channel(64);
@@ -66,7 +90,9 @@ impl RtuApplicationLayer {
             framing_error_tx: framing_error_tx.clone(),
             buffers: Arc::clone(&buffers),
             tasks: Mutex::new(Vec::new()),
+            custom_function_codes: Mutex::new(HashMap::new()),
             interval_ms,
+            inter_char_ms,
         });
 
         let mut data_rx = physical.subscribe_data();
@@ -74,12 +100,14 @@ impl RtuApplicationLayer {
         let framing_tx_for_data = framing_tx.clone();
         let framing_error_tx_for_data = framing_error_tx.clone();
         let role_for_data = Arc::clone(&role);
+        let app_for_data = Arc::clone(&app);
         let data_task = tokio::spawn(async move {
             loop {
                 match data_rx.recv().await {
                     Ok(event) => {
                         let role_snapshot = *role_for_data.lock().unwrap();
                         process_data_event(
+                            &app_for_data,
                             &buffers_for_data,
                             &framing_tx_for_data,
                             &framing_error_tx_for_data,
@@ -116,36 +144,73 @@ impl RtuApplicationLayer {
     fn role_snapshot(&self) -> Option<ApplicationRole> {
         *self.role.lock().unwrap()
     }
+
+    /// Register a custom function code predictor. Required for any non-standard
+    /// FC; without registration the frame is rejected with a framing error.
+    pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
+        self.custom_function_codes.lock().unwrap().insert(cfc.fc, cfc);
+    }
+
+    pub fn remove_custom_function_code(&self, fc: u8) {
+        self.custom_function_codes.lock().unwrap().remove(&fc);
+    }
 }
 
 pub(crate) fn compute_interval_ms(
     layer_type: crate::layers::physical::PhysicalLayerType,
-    baud_rate: Option<u32>,
-    interval_between_frames: Option<FrameInterval>,
-) -> u32 {
+    options: RtuApplicationLayerOptions,
+) -> (u32, u32) {
     use crate::layers::physical::PhysicalLayerType;
+    use crate::utils::bits_to_ms;
+
+    let RtuApplicationLayerOptions {
+        interval_between_frames,
+        inter_char_timeout,
+        baud_rate,
+    } = options;
+
     match layer_type {
-        PhysicalLayerType::Net => 0,
-        PhysicalLayerType::Serial => match interval_between_frames {
-            Some(FrameInterval::Ms(n)) => n,
-            other => {
-                let bits = match other {
-                    Some(FrameInterval::Bits(n)) => n,
-                    _ => 48,
-                };
-                let baud = baud_rate.unwrap_or(9600);
-                if baud > 19200 {
-                    2
-                } else {
-                    let exact = (bits as f64 * 1000.0) / baud as f64;
-                    exact.ceil() as u32
+        PhysicalLayerType::Net => (0, 0),
+        PhysicalLayerType::Serial => {
+            let baud = baud_rate.unwrap_or(9600);
+
+            let three_point_five_t = match interval_between_frames {
+                Some(FrameInterval::Ms(n)) => n as f64,
+                other => {
+                    let bits = match other {
+                        Some(FrameInterval::Bits(n)) => n,
+                        _ => 38.5,
+                    };
+                    if baud > 19200 {
+                        1.75
+                    } else {
+                        bits_to_ms(baud, bits).ceil()
+                    }
                 }
-            }
-        },
+            };
+
+            let one_point_five_t = match inter_char_timeout {
+                Some(FrameInterval::Ms(n)) => n as f64,
+                Some(FrameInterval::Bits(n)) => {
+                    if baud > 19200 {
+                        0.75
+                    } else {
+                        bits_to_ms(baud, n).ceil()
+                    }
+                }
+                None => 0.0,
+            };
+
+            (
+                three_point_five_t.max(0.0) as u32,
+                one_point_five_t.max(0.0) as u32,
+            )
+        }
     }
 }
 
 fn process_data_event(
+    app: &Arc<RtuApplicationLayer>,
     buffers: &Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
     framing_tx: &broadcast::Sender<Framing>,
     framing_error_tx: &broadcast::Sender<ModbusError>,
@@ -159,9 +224,10 @@ fn process_data_event(
     buffer.extend_from_slice(&data);
 
     let is_response = matches!(role, Some(ApplicationRole::Master));
+    let custom_fcs = app.custom_function_codes.lock().unwrap().clone();
 
     loop {
-        match try_extract(buffer, is_response) {
+        match try_extract(buffer, is_response, &custom_fcs) {
             ExtractResult::Frame { skip, frame_len } => {
                 if skip > 0 {
                     buffer.drain(..skip);
@@ -204,62 +270,57 @@ enum ExtractResult {
     Invalid,
 }
 
-fn try_extract(buffer: &[u8], is_response: bool) -> ExtractResult {
+fn try_extract(
+    buffer: &[u8],
+    is_response: bool,
+    custom_fcs: &HashMap<u8, CustomFunctionCode>,
+) -> ExtractResult {
     if buffer.len() < MIN_FRAME_LENGTH {
         return ExtractResult::Insufficient;
     }
-    if let Some(expected) = predict_rtu_frame_length(buffer, is_response) {
-        if expected > MAX_FRAME_LENGTH {
-            return ExtractResult::Invalid;
+
+    let fc = buffer[1];
+
+    // 1. User-registered custom FC predictor takes priority.
+    if let Some(cfc) = custom_fcs.get(&fc) {
+        let predictor = if is_response {
+            &cfc.predict_response_length
+        } else {
+            &cfc.predict_request_length
+        };
+        match predictor(buffer) {
+            CustomFcPredict::NeedMore => return ExtractResult::Insufficient,
+            CustomFcPredict::Length(n) => return check_expected(buffer, n),
         }
-        if buffer.len() < expected {
-            return ExtractResult::Insufficient;
-        }
-        if crc_matches(buffer, expected) {
-            return ExtractResult::Frame {
-                skip: 0,
-                frame_len: expected,
-            };
-        }
-        // Predict matched but CRC failed — corruption or wrong alignment.
-        // Drop one byte and retry.
-        return ExtractResult::Skip;
     }
-    sliding_extract(buffer)
+
+    // 2. Built-in predictor.
+    match predict_rtu_frame_length(buffer, is_response) {
+        PredictResult::Length(n) => check_expected(buffer, n),
+        PredictResult::NeedMore => ExtractResult::Insufficient,
+        PredictResult::Unknown => {
+            // Non-standard FC with no registered predictor → framing error.
+            // (The old slidingExtract fallback has been removed — Item #10.)
+            ExtractResult::Invalid
+        }
+    }
 }
 
-fn sliding_extract(buffer: &[u8]) -> ExtractResult {
-    let last_start = buffer.len().saturating_sub(MIN_FRAME_LENGTH);
-    for start in 0..=last_start {
-        let remaining = &buffer[start..];
-        let max_len = remaining.len().min(MAX_FRAME_LENGTH);
-        // Running CRC over remaining[..len - 2]; advances by one byte per
-        // length increment so the inner loop is O(max_len) instead of
-        // O(max_len^2). Matches njs-modbus slidingExtract's runningCrc.
-        let mut running_crc = crc(&remaining[..MIN_FRAME_LENGTH - 2]);
-        for len in MIN_FRAME_LENGTH..=max_len {
-            let frame_crc = u16::from_le_bytes([remaining[len - 2], remaining[len - 1]]);
-            if frame_crc == running_crc {
-                return ExtractResult::Frame {
-                    skip: start,
-                    frame_len: len,
-                };
-            }
-            if len < max_len {
-                running_crc = crc_with_seed(&remaining[len - 2..len - 1], running_crc);
-            }
-        }
+fn check_expected(buffer: &[u8], expected: usize) -> ExtractResult {
+    if expected > MAX_FRAME_LENGTH || expected < MIN_FRAME_LENGTH {
+        return ExtractResult::Invalid;
     }
-    // No frame found at any offset. If buffer hasn't reached MAX_FRAME_LENGTH
-    // yet, wait for more data — an unpredictable-FC response (e.g. FC 43/14)
-    // may still be arriving in fragments. Once buffer fills, dropping one
-    // byte is the only way to make progress, bounding steady-state buffering
-    // at ~MAX_FRAME_LENGTH per connection. Mirrors njs-modbus slidingExtract.
-    if buffer.len() >= MAX_FRAME_LENGTH {
-        ExtractResult::Skip
-    } else {
-        ExtractResult::Insufficient
+    if buffer.len() < expected {
+        return ExtractResult::Insufficient;
     }
+    if crc_matches(buffer, expected) {
+        return ExtractResult::Frame {
+            skip: 0,
+            frame_len: expected,
+        };
+    }
+    // Predict matched but CRC failed — corruption or wrong alignment.
+    ExtractResult::Skip
 }
 
 fn crc_matches(buffer: &[u8], length: usize) -> bool {
@@ -360,14 +421,23 @@ mod tests {
 
     #[test]
     fn test_compute_interval_ms_net_returns_zero() {
-        assert_eq!(compute_interval_ms(PhysicalLayerType::Net, None, None), 0);
         assert_eq!(
             compute_interval_ms(
                 PhysicalLayerType::Net,
-                Some(9600),
-                Some(FrameInterval::Ms(50))
+                RtuApplicationLayerOptions::default()
             ),
-            0,
+            (0, 0)
+        );
+        assert_eq!(
+            compute_interval_ms(
+                PhysicalLayerType::Net,
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(9600),
+                    interval_between_frames: Some(FrameInterval::Ms(50)),
+                    ..Default::default()
+                }
+            ),
+            (0, 0),
             "Net always ignores baud/interval inputs"
         );
     }
@@ -375,28 +445,54 @@ mod tests {
     #[test]
     fn test_compute_interval_ms_serial_default_9600() {
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Serial, Some(9600), None),
-            5
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(9600),
+                    ..Default::default()
+                }
+            ),
+            (5, 0)
         );
     }
 
     #[test]
     fn test_compute_interval_ms_serial_default_19200() {
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Serial, Some(19200), None),
-            3
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(19200),
+                    ..Default::default()
+                }
+            ),
+            (3, 0)
         );
     }
 
     #[test]
-    fn test_compute_interval_ms_serial_above_19200_uses_fixed() {
+    fn test_compute_interval_ms_serial_above_19200_uses_spec_fixed() {
+        // baud > 19200 → spec fixed 1.75 ms for t3.5, 0.75 ms for t1.5
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Serial, Some(38400), None),
-            2
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(38400),
+                    ..Default::default()
+                }
+            ),
+            (1, 0)
         );
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Serial, Some(115200), None),
-            2
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(115200),
+                    inter_char_timeout: Some(FrameInterval::Bits(16.5)),
+                    ..Default::default()
+                }
+            ),
+            (1, 0)
         );
     }
 
@@ -405,10 +501,13 @@ mod tests {
         assert_eq!(
             compute_interval_ms(
                 PhysicalLayerType::Serial,
-                Some(9600),
-                Some(FrameInterval::Ms(20))
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(9600),
+                    interval_between_frames: Some(FrameInterval::Ms(20)),
+                    ..Default::default()
+                }
             ),
-            20
+            (20, 0)
         );
     }
 
@@ -417,79 +516,38 @@ mod tests {
         assert_eq!(
             compute_interval_ms(
                 PhysicalLayerType::Serial,
-                Some(9600),
-                Some(FrameInterval::Bits(96))
+                RtuApplicationLayerOptions {
+                    baud_rate: Some(9600),
+                    interval_between_frames: Some(FrameInterval::Bits(96.0)),
+                    ..Default::default()
+                }
             ),
-            10
+            (10, 0)
         );
     }
 
     #[test]
     fn test_compute_interval_ms_serial_default_baud_when_unspecified() {
         assert_eq!(
-            compute_interval_ms(PhysicalLayerType::Serial, None, None),
-            5
+            compute_interval_ms(
+                PhysicalLayerType::Serial,
+                RtuApplicationLayerOptions::default()
+            ),
+            (5, 0)
         );
     }
 
-    // ===== sliding_extract =====
-
     #[test]
-    fn test_sliding_extract_waits_when_under_max_and_no_match() {
-        // Unpredictable-FC frame still in transit — predict returned None
-        // and the partial bytes don't form a valid CRC at any length yet.
-        // Must NOT drop bytes; wait for more data so e.g. a fragmented
-        // FC 43/14 response on TCP-RTU can be reassembled.
-        let buffer = vec![0xaa; 100];
-        assert!(matches!(
-            sliding_extract(&buffer),
-            ExtractResult::Insufficient
-        ));
-    }
-
-    #[test]
-    fn test_sliding_extract_skips_when_at_max_and_no_match() {
-        // Once buffer reaches MAX_FRAME_LENGTH bytes with no valid CRC,
-        // dropping one byte is the only way to make progress. This bounds
-        // steady-state buffering at ~MAX_FRAME_LENGTH per connection.
-        let buffer = vec![0xaa; MAX_FRAME_LENGTH];
-        assert!(matches!(sliding_extract(&buffer), ExtractResult::Skip));
-    }
-
-    #[test]
-    fn test_sliding_extract_returns_frame_at_offset_0() {
-        // Unpredictable-FC frame (e.g. FC 43 response) sitting at offset 0.
-        let mut frame = vec![0x01u8, 0x2b, 0x0e];
-        let c = crate::utils::crc(&frame);
-        frame.extend_from_slice(&c.to_le_bytes());
-        match sliding_extract(&frame) {
-            ExtractResult::Frame { skip, frame_len } => {
-                assert_eq!(skip, 0);
-                assert_eq!(frame_len, 5);
-            }
-            _ => panic!("expected Frame"),
-        }
-    }
-
-    #[test]
-    fn test_sliding_extract_finds_frame_at_later_offset() {
-        // sliding_extract scans every starting offset (matching njs-modbus
-        // slidingExtract). A valid frame buried after some prefix junk is
-        // found in one call, with `skip` indicating how many leading bytes
-        // to drop. This is the common recovery path for serial noise / TCP
-        // segment seams in industrial deployments.
-        let mut frame = vec![0x01u8, 0x2b, 0x0e];
-        let c = crate::utils::crc(&frame);
-        frame.extend_from_slice(&c.to_le_bytes());
-        // Prepend 3 bytes of junk so the valid frame starts at offset 3.
-        let mut buffer = vec![0xffu8, 0x00, 0xfe];
-        buffer.extend_from_slice(&frame);
-        match sliding_extract(&buffer) {
-            ExtractResult::Frame { skip, frame_len } => {
-                assert_eq!(skip, 3);
-                assert_eq!(frame_len, 5);
-            }
-            _ => panic!("expected Frame at skip=3"),
-        }
+    fn test_compute_interval_ms_serial_with_inter_char_timeout() {
+        let (t35, t15) = compute_interval_ms(
+            PhysicalLayerType::Serial,
+            RtuApplicationLayerOptions {
+                baud_rate: Some(9600),
+                inter_char_timeout: Some(FrameInterval::Bits(21.0)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(t35, 5);
+        assert_eq!(t15, 3); // ceil(21.0 * 1000 / 9600) = ceil(2.1875) = 3
     }
 }
