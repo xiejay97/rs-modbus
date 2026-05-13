@@ -4,7 +4,7 @@ use crate::layers::physical::PhysicalLayer;
 use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
 use crate::types::{ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId};
 use crate::utils::{parse_coils, parse_registers};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -41,6 +41,7 @@ pub struct ModbusMaster<A: ApplicationLayer, P: PhysicalLayer> {
     pub concurrent: bool,
     next_tid: AtomicU16,
     closed: AtomicBool,
+    clean_level: AtomicU8,
     queue_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -61,6 +62,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             concurrent: options.concurrent,
             next_tid: AtomicU16::new(1),
             closed: AtomicBool::new(false),
+            clean_level: AtomicU8::new(0),
             queue_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
         }
@@ -77,11 +79,31 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .unwrap()
     }
 
+    fn clean(&self, level: u8) {
+        let current = self.clean_level.load(Ordering::Acquire);
+        if current == 2 {
+            return;
+        }
+        if current == 1 && level == 1 {
+            return;
+        }
+        self.closed.store(true, Ordering::Release);
+        let err = if level == 2 {
+            ModbusError::InvalidState("Master destroyed".into())
+        } else {
+            ModbusError::InvalidState("Master closed".into())
+        };
+        self.session.stop_all(err);
+        self.clean_level.store(level, Ordering::Release);
+    }
+
     pub async fn open(&self) -> Result<(), ModbusError> {
-        // Reset the closed flag so a close()+open() cycle on the same master
-        // doesn't permanently reject subsequent requests with "Master closed".
-        // Mirrors njs-modbus 9be1165.
+        if self.clean_level.load(Ordering::Acquire) == 2 {
+            return Err(ModbusError::PortDestroyed);
+        }
+        self.clean_level.store(0, Ordering::Release);
         self.closed.store(false, Ordering::Release);
+        self.next_tid.store(1, Ordering::Release);
 
         let session = Arc::clone(&self.session);
         let mut framing_rx = self.application.subscribe_framing();
@@ -117,20 +139,18 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
     }
 
     pub async fn close(&self) -> Result<(), ModbusError> {
-        // Mark closed BEFORE rejecting waiters so any racing new requests
-        // see the flag and bail out from `wait_response` directly. Reject
-        // every in-flight waiter so callers don't have to wait for the
-        // (now-disconnected) socket to time out.
-        self.closed.store(true, Ordering::Release);
-        self.session
-            .stop_all(ModbusError::InvalidState("Master closed".into()));
+        if self.clean_level.load(Ordering::Acquire) == 2 {
+            return Ok(());
+        }
+        self.clean(1);
         self.physical.close().await
     }
 
     pub async fn destroy(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.session
-            .stop_all(ModbusError::InvalidState("Master destroyed".into()));
+        if self.clean_level.load(Ordering::Acquire) == 2 {
+            return;
+        }
+        self.clean(2);
         {
             let mut tasks = self.tasks.lock().unwrap();
             for task in tasks.drain(..) {

@@ -347,6 +347,9 @@ impl PhysicalLayer for UdpPhysicalLayer {
     }
 
     async fn destroy(&self) {
+        if *self.is_destroyed.lock().await {
+            return;
+        }
         *self.is_destroyed.lock().await = true;
         let _ = self.close().await;
     }

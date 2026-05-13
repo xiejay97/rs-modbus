@@ -4,6 +4,7 @@ use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
 use crate::utils::lrc;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -69,6 +70,7 @@ pub struct AsciiApplicationLayer {
     states: Arc<Mutex<HashMap<ConnectionId, ConnectionState>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     pub lenient_hex: bool,
+    destroyed: AtomicBool,
 }
 
 impl AsciiApplicationLayer {
@@ -92,6 +94,7 @@ impl AsciiApplicationLayer {
             states: Arc::clone(&states),
             tasks: Mutex::new(Vec::new()),
             lenient_hex,
+            destroyed: AtomicBool::new(false),
         });
 
         let mut data_rx = physical.subscribe_data();
@@ -328,6 +331,9 @@ impl ApplicationLayer for AsciiApplicationLayer {
     }
 
     async fn destroy(&self) {
+        if self.destroyed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let mut tasks = self.tasks.lock().unwrap();
         for task in tasks.drain(..) {
             task.abort();

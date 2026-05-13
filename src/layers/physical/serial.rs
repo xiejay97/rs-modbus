@@ -195,6 +195,9 @@ impl PhysicalLayer for SerialPhysicalLayer {
     }
 
     async fn destroy(&self) {
+        if *self.is_destroyed.lock().unwrap() {
+            return;
+        }
         *self.is_destroyed.lock().unwrap() = true;
         let _ = self.close().await;
     }

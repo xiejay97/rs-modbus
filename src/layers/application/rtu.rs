@@ -4,6 +4,7 @@ use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, CustomFcPredict, CustomFunctionCode, FramedDataUnit};
 use crate::utils::{crc, predict_rtu_frame_length, PredictResult};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -58,6 +59,7 @@ pub struct RtuApplicationLayer {
     /// Computed millisecond timeout for the t1.5 inter-character gap.
     /// `0` when disabled.
     inter_char_ms: u32,
+    destroyed: AtomicBool,
 }
 
 /// Fixed-size byte pool for per-connection RTU frame buffering.
@@ -169,6 +171,7 @@ impl RtuApplicationLayer {
             custom_function_codes: Mutex::new(HashMap::new()),
             interval_ms,
             inter_char_ms,
+            destroyed: AtomicBool::new(false),
         });
 
         let mut data_rx = physical.subscribe_data();
@@ -545,11 +548,15 @@ impl ApplicationLayer for RtuApplicationLayer {
     }
 
     async fn destroy(&self) {
+        if self.destroyed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let mut tasks = self.tasks.lock().unwrap();
         for task in tasks.drain(..) {
             task.abort();
         }
         self.buffers.lock().unwrap().clear();
+        self.custom_function_codes.lock().unwrap().clear();
     }
 }
 

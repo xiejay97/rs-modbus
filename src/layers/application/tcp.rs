@@ -3,7 +3,7 @@ use crate::layers::application::{ApplicationLayer, ApplicationProtocol, Applicat
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{ApplicationDataUnit, FramedDataUnit};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -17,6 +17,7 @@ pub struct TcpApplicationLayer {
     framing_error_tx: broadcast::Sender<ModbusError>,
     buffers: Arc<Mutex<HashMap<ConnectionId, Vec<u8>>>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    destroyed: AtomicBool,
 }
 
 impl TcpApplicationLayer {
@@ -32,6 +33,7 @@ impl TcpApplicationLayer {
             framing_error_tx: framing_error_tx.clone(),
             buffers: Arc::clone(&buffers),
             tasks: Mutex::new(Vec::new()),
+            destroyed: AtomicBool::new(false),
         });
 
         let mut data_rx = physical.subscribe_data();
@@ -226,6 +228,9 @@ impl ApplicationLayer for TcpApplicationLayer {
     }
 
     async fn destroy(&self) {
+        if self.destroyed.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let mut tasks = self.tasks.lock().unwrap();
         for task in tasks.drain(..) {
             task.abort();

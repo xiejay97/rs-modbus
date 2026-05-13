@@ -125,6 +125,7 @@ pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     is_open: Arc<std::sync::atomic::AtomicBool>,
     custom_function_codes: tokio::sync::Mutex<HashMap<u8, CustomFunctionCode>>,
+    clean_level: std::sync::atomic::AtomicU8,
     /// Per-address async locks for FC22/FC23 fallback paths. Maps a register
     /// address to a tokio mutex; requests that touch overlapping addresses
     /// are serialized. Mirrors njs-modbus `withAddressLock`.
@@ -157,6 +158,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             is_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             custom_function_codes: tokio::sync::Mutex::new(HashMap::new()),
             address_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            clean_level: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -178,6 +180,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     pub async fn open(&self) -> Result<(), ModbusError> {
         self.is_open
             .store(true, std::sync::atomic::Ordering::Release);
+        self.clean_level
+            .store(0, std::sync::atomic::Ordering::Release);
         // Fresh session — drop any state from a prior open/close cycle.
         self.queues.lock().await.clear();
 
@@ -283,24 +287,45 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         Ok(())
     }
 
-    pub async fn close(&self) -> Result<(), ModbusError> {
+    async fn clean(&self, level: u8) {
+        let current = self.clean_level.load(std::sync::atomic::Ordering::Acquire);
+        if current == 2 {
+            return;
+        }
+        if current == 1 && level == 1 {
+            return;
+        }
         self.is_open
             .store(false, std::sync::atomic::Ordering::Release);
         self.queues.lock().await.clear();
-        self.physical.close().await
+        self.address_locks.lock().await.clear();
+        if level == 2 {
+            self.custom_function_codes.lock().await.clear();
+            self.models.lock().await.clear();
+        }
+        self.clean_level
+            .store(level, std::sync::atomic::Ordering::Release);
+    }
+
+    pub async fn close(&self) -> Result<(), ModbusError> {
+        if self.clean_level.load(std::sync::atomic::Ordering::Acquire) == 2 {
+            return Ok(());
+        }
+        self.clean(1).await;
+        return self.physical.close().await;
     }
 
     pub async fn destroy(&self) {
-        self.is_open
-            .store(false, std::sync::atomic::Ordering::Release);
+        if self.clean_level.load(std::sync::atomic::Ordering::Acquire) == 2 {
+            return;
+        }
+        self.clean(2).await;
         {
             let mut tasks = self.tasks.lock().await;
             for task in tasks.drain(..) {
                 task.abort();
             }
         }
-        self.queues.lock().await.clear();
-        self.address_locks.lock().await.clear();
         let _ = self.physical.destroy().await;
     }
 
