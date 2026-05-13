@@ -120,12 +120,10 @@ pub mod utils;
 // Re-export commonly used types for convenience
 pub use error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
 pub use layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
-pub use layers::physical::{
-    ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn,
-};
+pub use layers::physical::{ConnectionId, DataEvent, PhysicalLayer, PhysicalLayerType, ResponseFn};
 pub use master::{ModbusMaster, ModbusMasterOptions};
 pub use master_session::{MasterSession, PreCheck, PreCheckOutcome};
-pub use slave::{ModbusSlave, ModbusSlaveModel};
+pub use slave::{ModbusSlave, ModbusSlaveModel, ModbusSlaveOptions};
 pub use types::{
     AddressRange, ApplicationDataUnit, DeviceIdentification, DeviceObject, FramedDataUnit, ServerId,
 };

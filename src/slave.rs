@@ -1,15 +1,15 @@
 use crate::error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
-use crate::layers::application::{ApplicationLayer, ApplicationRole};
-use crate::layers::physical::{PhysicalLayer, ResponseFn};
+use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole};
+use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
 use crate::types::{AddressRange, ApplicationDataUnit, FramedDataUnit, ServerId};
 use crate::utils::{check_range, pack_coils, pack_registers};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 
 type SlaveResponseFn = Arc<
     dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = Result<(), ModbusError>> + Send>> + Send + Sync,
@@ -33,11 +33,7 @@ pub trait ModbusSlaveModel: Send + Sync {
     /// Default: loop `write_single_coil`. Mirrors njs-modbus' behavior where
     /// a model that only provides `writeSingleCoil` is automatically usable
     /// for FC15 requests. Override to provide a bulk-write fast path.
-    async fn write_multiple_coils(
-        &self,
-        address: u16,
-        values: &[bool],
-    ) -> Result<(), ModbusError> {
+    async fn write_multiple_coils(&self, address: u16, values: &[bool]) -> Result<(), ModbusError> {
         for (i, &v) in values.iter().enumerate() {
             self.write_single_coil(address + i as u16, v).await?;
         }
@@ -103,15 +99,47 @@ pub trait ModbusSlaveModel: Send + Sync {
     }
 }
 
+/// Tunables for [`ModbusSlave::with_options`]. Mirrors njs-modbus
+/// `ModbusSlaveOptions`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModbusSlaveOptions {
+    /// Pipelined concurrent processing of requests within a single
+    /// connection. Only valid for Modbus TCP application layers (TID
+    /// disambiguates responses); constructing a slave with `concurrent:
+    /// true` on RTU or ASCII panics. Defaults to `false` (per-connection
+    /// FIFO — same connection serialized, different connections in
+    /// parallel).
+    pub concurrent: bool,
+}
+
+struct QueueEntry {
+    items: VecDeque<(FramedDataUnit, ResponseFn)>,
+    processing: bool,
+}
+
 pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     application: Arc<A>,
     physical: Arc<P>,
-    pub models: Arc<Mutex<HashMap<u8, Box<dyn ModbusSlaveModel>>>>,
-    tx: Mutex<Option<mpsc::Sender<(FramedDataUnit, ResponseFn)>>>,
+    pub models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+    pub concurrent: bool,
+    queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    is_open: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P> {
     pub fn new(application: Arc<A>, physical: Arc<P>) -> Self {
+        Self::with_options(application, physical, ModbusSlaveOptions::default())
+    }
+
+    pub fn with_options(
+        application: Arc<A>,
+        physical: Arc<P>,
+        options: ModbusSlaveOptions,
+    ) -> Self {
+        if options.concurrent && application.protocol() != ApplicationProtocol::Tcp {
+            panic!("concurrent mode requires a Modbus TCP application layer");
+        }
         application
             .set_role(ApplicationRole::Slave)
             .expect("application layer is already bound to a different role");
@@ -119,13 +147,22 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             application,
             physical,
             models: Arc::new(Mutex::new(HashMap::new())),
-            tx: Mutex::new(None),
+            concurrent: options.concurrent,
+            queues: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Mutex::new(Vec::new()),
+            is_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
     pub async fn add(&self, model: Box<dyn ModbusSlaveModel>) {
         let unit = model.unit();
-        self.models.lock().await.insert(unit, model);
+        // Convert to Arc so model references can be cheaply cloned out of
+        // the map and the map lock released before handler invocation.
+        // That's critical for slave-side concurrency: holding the models
+        // mutex across an FC handler's `.await` would serialize every
+        // request slave-wide regardless of which connection it came from.
+        let arc: Arc<dyn ModbusSlaveModel> = Arc::from(model);
+        self.models.lock().await.insert(unit, arc);
     }
 
     pub async fn remove(&self, unit: u8) {
@@ -133,28 +170,49 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     }
 
     pub async fn open(&self) -> Result<(), ModbusError> {
-        let (tx, mut rx) = mpsc::channel::<(FramedDataUnit, ResponseFn)>(100);
-        *self.tx.lock().await = Some(tx.clone());
+        self.is_open
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Fresh session — drop any state from a prior open/close cycle.
+        self.queues.lock().await.clear();
 
         let application = Arc::clone(&self.application);
         let models = Arc::clone(&self.models);
-        tokio::spawn(async move {
-            while let Some((frame, response_fn)) = rx.recv().await {
-                Self::process_frame(&application, &models, frame, response_fn).await;
-            }
-        });
-
+        let queues = Arc::clone(&self.queues);
+        let concurrent = self.concurrent;
+        let is_open = Arc::clone(&self.is_open);
         let mut framing_rx = self.application.subscribe_framing();
-        tokio::spawn(async move {
+        let framing_task = tokio::spawn(async move {
             loop {
                 match framing_rx.recv().await {
                     Ok(framing) => {
-                        let framed = FramedDataUnit {
+                        if !is_open.load(std::sync::atomic::Ordering::Acquire) {
+                            continue;
+                        }
+                        let frame = FramedDataUnit {
                             adu: framing.adu,
                             raw: framing.raw,
                         };
-                        if tx.send((framed, framing.response)).await.is_err() {
-                            break;
+                        if concurrent {
+                            // TCP-only: each frame gets its own task. The
+                            // TID embedded in the response disambiguates.
+                            let app = Arc::clone(&application);
+                            let mdls = Arc::clone(&models);
+                            tokio::spawn(async move {
+                                Self::process_frame(&app, &mdls, frame, framing.response).await;
+                            });
+                        } else {
+                            // Per-connection FIFO: push onto this
+                            // connection's queue, kick off a drain task
+                            // if not already running.
+                            Self::enqueue_and_drain(
+                                Arc::clone(&queues),
+                                Arc::clone(&application),
+                                Arc::clone(&models),
+                                framing.connection,
+                                frame,
+                                framing.response,
+                            )
+                            .await;
                         }
                     }
                     Err(RecvError::Lagged(_)) => continue,
@@ -163,43 +221,173 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             }
         });
 
+        // Drop a connection's queue when its peer disconnects — the
+        // response closure points at a now-dead socket, so there is no
+        // point continuing to process queued frames. Keeps the in-flight
+        // one running; the drain task cleans up the entry when it lands
+        // on an empty queue.
+        let queues_for_close = Arc::clone(&self.queues);
+        let mut conn_close_rx = self.physical.subscribe_connection_close();
+        let conn_close_task = tokio::spawn(async move {
+            loop {
+                match conn_close_rx.recv().await {
+                    Ok(conn_id) => {
+                        let mut g = queues_for_close.lock().await;
+                        if let Some(entry) = g.get_mut(&conn_id) {
+                            entry.items.clear();
+                            if !entry.processing {
+                                g.remove(&conn_id);
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // Clear everything on a full physical-layer close.
+        let queues_for_full_close = Arc::clone(&self.queues);
+        let mut close_rx = self.physical.subscribe_close();
+        let close_task = tokio::spawn(async move {
+            loop {
+                match close_rx.recv().await {
+                    Ok(()) => {
+                        queues_for_full_close.lock().await.clear();
+                    }
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        self.tasks
+            .lock()
+            .await
+            .extend([framing_task, conn_close_task, close_task]);
+
         self.physical.open().await?;
         Ok(())
     }
 
     pub async fn close(&self) -> Result<(), ModbusError> {
-        *self.tx.lock().await = None;
+        self.is_open
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.queues.lock().await.clear();
         self.physical.close().await
     }
 
     pub async fn destroy(&self) {
-        *self.tx.lock().await = None;
+        self.is_open
+            .store(false, std::sync::atomic::Ordering::Release);
+        {
+            let mut tasks = self.tasks.lock().await;
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
+        self.queues.lock().await.clear();
         let _ = self.physical.destroy().await;
+    }
+
+    /// Push a frame onto the per-connection queue. If no drain task is
+    /// currently running for this connection, spawn one; otherwise the
+    /// already-running drain picks the new item up on its next iteration.
+    async fn enqueue_and_drain(
+        queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
+        application: Arc<A>,
+        models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        connection: ConnectionId,
+        frame: FramedDataUnit,
+        response: ResponseFn,
+    ) {
+        let should_spawn = {
+            let mut g = queues.lock().await;
+            let entry = g.entry(Arc::clone(&connection)).or_insert(QueueEntry {
+                items: VecDeque::new(),
+                processing: false,
+            });
+            entry.items.push_back((frame, response));
+            if entry.processing {
+                false
+            } else {
+                entry.processing = true;
+                true
+            }
+        };
+        if should_spawn {
+            tokio::spawn(async move {
+                Self::drain_loop(queues, application, models, connection).await;
+            });
+        }
+    }
+
+    /// Drain the per-connection queue until empty. The entry is removed
+    /// from the map when the queue settles empty so the map doesn't grow
+    /// unbounded across ephemeral connections (UDP rinfos, brief TCP
+    /// clients). If the entry is gone mid-drain (cleared by a
+    /// `connection_close` handler), we bail early.
+    async fn drain_loop(
+        queues: Arc<Mutex<HashMap<ConnectionId, QueueEntry>>>,
+        application: Arc<A>,
+        models: Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        connection: ConnectionId,
+    ) {
+        loop {
+            let next = {
+                let mut g = queues.lock().await;
+                match g.get_mut(&connection) {
+                    Some(entry) => entry.items.pop_front(),
+                    None => return,
+                }
+            };
+            match next {
+                Some((frame, response)) => {
+                    Self::process_frame(&application, &models, frame, response).await;
+                }
+                None => {
+                    let mut g = queues.lock().await;
+                    if let Some(entry) = g.get_mut(&connection) {
+                        if entry.items.is_empty() {
+                            g.remove(&connection);
+                            return;
+                        }
+                        // else a new item snuck in between pop_front and
+                        // this lock; loop and re-drain.
+                    } else {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     async fn process_frame(
         application: &Arc<A>,
-        models: &Arc<Mutex<HashMap<u8, Box<dyn ModbusSlaveModel>>>>,
+        models: &Arc<Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         frame: FramedDataUnit,
         response_fn: ResponseFn,
     ) {
         let unit = frame.adu.unit;
-        let models_guard = models.lock().await;
-
-        let model_refs: Vec<u8> = if unit == 0 {
-            models_guard.keys().copied().collect()
-        } else {
-            match models_guard.get(&unit) {
-                Some(_) => vec![unit],
-                None => return,
+        // Snapshot the model Arc(s) under a brief lock so the map mutex
+        // isn't held across handler `.await` points — otherwise a slow
+        // handler on one model would block every other connection's
+        // frames slave-wide. Mirrors the per-connection FIFO goal of
+        // Item #4.
+        let models_snapshot: Vec<Arc<dyn ModbusSlaveModel>> = {
+            let g = models.lock().await;
+            if unit == 0 {
+                g.values().map(Arc::clone).collect()
+            } else {
+                match g.get(&unit) {
+                    Some(m) => vec![Arc::clone(m)],
+                    None => return,
+                }
             }
         };
 
-        for model_unit in model_refs {
-            let model = match models_guard.get(&model_unit) {
-                Some(m) => m.as_ref(),
-                None => continue,
-            };
+        for model_arc in models_snapshot {
+            let model: &dyn ModbusSlaveModel = &*model_arc;
 
             let response: SlaveResponseFn = if unit == 0 {
                 Arc::new(|_| {
