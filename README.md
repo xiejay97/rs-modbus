@@ -51,7 +51,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rs-modbus = "0.1"
+rs-modbus = "1.0"
 ```
 
 For serial port support, enable the `serial` feature:

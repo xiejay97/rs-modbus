@@ -3,7 +3,7 @@ use crate::layers::physical::{ConnectionId, ResponseFn};
 use crate::types::{ApplicationDataUnit, CustomFunctionCode, FramedDataUnit};
 use tokio::sync::broadcast;
 
-/// Application-layer role. Set by [`ModbusMaster`] / [`ModbusSlave`] when they
+/// Application-layer role. Set by `ModbusMaster` / `ModbusSlave` when they
 /// take ownership of an application layer.
 ///
 /// RTU framing differentiates request vs response by role (request and

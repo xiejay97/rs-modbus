@@ -2,7 +2,9 @@ use crate::error::ModbusError;
 use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole, Framing};
 use crate::layers::physical::PhysicalLayer;
 use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
-use crate::types::{ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId};
+use crate::types::{
+    ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId,
+};
 use crate::utils::{parse_coils, parse_registers};
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};

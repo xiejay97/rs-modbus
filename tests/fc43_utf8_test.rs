@@ -44,12 +44,10 @@ async fn round_trip_multibyte_utf8_value() {
     let slave = ModbusSlave::new(app.clone(), server.clone());
 
     let mut ident = HashMap::new();
-    ident.insert(0x00, "Vend\u{e9}r".to_string());     // é = 2 UTF-8 bytes
+    ident.insert(0x00, "Vend\u{e9}r".to_string()); // é = 2 UTF-8 bytes
     ident.insert(0x01, "ProductCode".to_string());
     ident.insert(0x02, "MajorMinorRevision".to_string());
-    slave
-        .add(Box::new(Utf8IdentModel { ident }))
-        .await;
+    slave.add(Box::new(Utf8IdentModel { ident })).await;
     slave.open().await.unwrap();
     let addr = server.get_addr().await.unwrap();
 
@@ -70,7 +68,9 @@ async fn round_trip_multibyte_utf8_value() {
         .read_device_identification(UNIT, 0x01, 0x00, None)
         .await;
 
-    let device = result.expect("should receive device identification").expect("non-empty response");
+    let device = result
+        .expect("should receive device identification")
+        .expect("non-empty response");
     assert_eq!(device.objects.len(), 3);
     assert_eq!(device.objects[0].id, 0x00);
     assert_eq!(device.objects[0].value, "Vend\u{e9}r");

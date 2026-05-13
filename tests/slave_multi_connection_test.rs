@@ -7,8 +7,7 @@ use async_trait::async_trait;
 use rs_modbus::error::ModbusError;
 use rs_modbus::layers::application::ApplicationLayer;
 use rs_modbus::layers::application::{
-    AsciiApplicationLayer, RtuApplicationLayer, RtuApplicationLayerOptions,
-    TcpApplicationLayer,
+    AsciiApplicationLayer, RtuApplicationLayer, RtuApplicationLayerOptions, TcpApplicationLayer,
 };
 use rs_modbus::layers::physical::{PhysicalLayer, TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};

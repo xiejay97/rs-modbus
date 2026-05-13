@@ -41,7 +41,8 @@ async fn setup() -> (
     server.open().await.unwrap();
     let addr = server.get_addr().await.unwrap();
     // RTU layer bound to Net transport (no inter-frame timer).
-    let application = RtuApplicationLayer::new(server.clone(), RtuApplicationLayerOptions::default());
+    let application =
+        RtuApplicationLayer::new(server.clone(), RtuApplicationLayerOptions::default());
     application.set_role(ApplicationRole::Slave).unwrap();
     sleep(Duration::from_millis(30)).await;
 

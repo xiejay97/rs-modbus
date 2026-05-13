@@ -1,5 +1,5 @@
 //! `MasterSession` — owns the in-flight "awaiting response" slots of a
-//! [`ModbusMaster`]. Multi-slot, keyed by [`WaiterKey`]: TCP requests key
+//! `ModbusMaster`. Multi-slot, keyed by [`WaiterKey`]: TCP requests key
 //! by their transaction ID (TID), FIFO/RTU/ASCII requests share the
 //! [`WaiterKey::Fifo`] slot since they have no TID to disambiguate by.
 //!

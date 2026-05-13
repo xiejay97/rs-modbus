@@ -1,14 +1,12 @@
 //! FC17 Server ID validation tests (Item #13)
 
+use async_trait::async_trait;
 use rs_modbus::error::ModbusError;
 use rs_modbus::layers::application::TcpApplicationLayer;
-use rs_modbus::layers::physical::{
-    TcpClientPhysicalLayer, TcpServerPhysicalLayer,
-};
+use rs_modbus::layers::physical::{TcpClientPhysicalLayer, TcpServerPhysicalLayer};
 use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
 use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
 use rs_modbus::types::{AddressRange, ServerId};
-use async_trait::async_trait;
 
 struct TestModel {
     server_id: Vec<u8>,

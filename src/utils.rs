@@ -159,10 +159,7 @@ pub fn is_standard_fc(fc: u8, is_response: bool) -> bool {
             0x05 | 0x06 | 0x0f | 0x10 | 0x16 | 0x01 | 0x02 | 0x03 | 0x04 | 0x11 | 0x17 | 0x2b
         )
     } else {
-        matches!(
-            fc,
-            0x01..=0x06 | 0x11 | 0x16 | 0x2b | 0x0f | 0x10 | 0x17
-        )
+        matches!(fc, 0x01..=0x06 | 0x11 | 0x16 | 0x2b | 0x0f | 0x10 | 0x17)
     }
 }
 
@@ -406,7 +403,10 @@ mod tests {
 
     #[test]
     fn test_predict_buffer_too_short_need_more() {
-        assert_eq!(predict_rtu_frame_length(&[], false), PredictResult::NeedMore);
+        assert_eq!(
+            predict_rtu_frame_length(&[], false),
+            PredictResult::NeedMore
+        );
         assert_eq!(
             predict_rtu_frame_length(&[0x01], false),
             PredictResult::NeedMore
@@ -604,10 +604,7 @@ mod tests {
     fn test_predict_fc43_response_unsupported_mei_is_unknown() {
         // MEI != 0x0E (e.g. CANopen 0x0D) — not handled by built-in predictor.
         let buf = [0x01u8, 0x2b, 0x0d, 0x01, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(
-            predict_rtu_frame_length(&buf, true),
-            PredictResult::Unknown
-        );
+        assert_eq!(predict_rtu_frame_length(&buf, true), PredictResult::Unknown);
     }
 
     #[test]

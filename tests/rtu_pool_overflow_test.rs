@@ -73,12 +73,12 @@ async fn pool_consumes_chunk_larger_than_pool_without_truncating() {
     })
     .await;
 
-    assert!(result.is_ok(), "timeout waiting for 80 frames, got {}", count);
-    assert_eq!(
-        count, 80,
-        "expected 80 frames, got {}",
+    assert!(
+        result.is_ok(),
+        "timeout waiting for 80 frames, got {}",
         count
     );
+    assert_eq!(count, 80, "expected 80 frames, got {}", count);
 
     client.destroy().await;
     server.destroy().await;

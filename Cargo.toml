@@ -1,6 +1,6 @@
 [package]
 name = "rs-modbus"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Xie Jay <xiejay97@gmail.com>"]
 description = "A pure Rust implementation of MODBUS protocol."
@@ -22,7 +22,9 @@ tokio = { version = "1", default-features = false, features = ["io-util", "net",
 thiserror = "1"
 async-trait = "0.1"
 serialport = { version = "4", optional = true }
-uuid = { version = "1", features = ["v4"] }
+# uuid ≥1.14 depends on getrandom 0.4 which requires Rust ≥1.85 (edition 2024).
+# Keep uuid <1.14 so MSRV 1.71 stays valid.
+uuid = { version = ">=1, <1.14", features = ["v4"] }
 
 [features]
 default = []

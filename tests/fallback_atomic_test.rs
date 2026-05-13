@@ -67,11 +67,7 @@ impl ModbusSlaveModel for AtomicTestModel {
         Ok(result)
     }
 
-    async fn write_single_register(
-        &self,
-        address: u16,
-        value: u16,
-    ) -> Result<(), ModbusError> {
+    async fn write_single_register(&self, address: u16, value: u16) -> Result<(), ModbusError> {
         let mut writes = self.concurrent_writes.lock().await;
         *writes += 1;
         let mut max = self.max_concurrent_writes.lock().await;
@@ -180,8 +176,14 @@ async fn fc23_fallback_two_concurrent_requests_serializes_writes() {
     let a2 = Arc::clone(&a);
     let b2 = Arc::clone(&b);
     let (r1, r2) = tokio::join!(
-        async move { a2.read_and_write_multiple_registers(UNIT, 10, 1, 0, &[0xaaaa, 0x1111], None).await },
-        async move { b2.read_and_write_multiple_registers(UNIT, 10, 1, 0, &[0xbbbb, 0x2222], None).await },
+        async move {
+            a2.read_and_write_multiple_registers(UNIT, 10, 1, 0, &[0xaaaa, 0x1111], None)
+                .await
+        },
+        async move {
+            b2.read_and_write_multiple_registers(UNIT, 10, 1, 0, &[0xbbbb, 0x2222], None)
+                .await
+        },
     );
 
     assert!(r1.is_ok(), "first r/w failed: {:?}", r1);

@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-13
+
+### Added
+
+- Full async/await support via tokio.
+- Per-address async locks for FC22/FC23 fallback paths.
+- UUID-based connection IDs.
+- RTU pool-based frame extraction.
+- Strict RTU mode with t3.5/t1.5 timers.
+- Custom function code predictor support (`CustomFcPredict`).
+- `InvalidHex` error for ASCII framing.
+
+### Changed
+
+- **BREAKING**: `ModbusMaster` and `ModbusSlave` constructors now take `Arc<A>` / `Arc<P>`.
+- **BREAKING**: All physical layer and application layer `new()` methods now return `Arc<Self>`.
+- **BREAKING**: `ModbusMaster::read_device_identification` return type changed from `HashMap<u8, String>` to `DeviceIdentification`.
+- **BREAKING**: `ModbusSlaveModel::read_device_identification` return type changed from `HashMap<u8, String>` to `HashMap<u8, String>` (aligned with master).
+- Deduplicated `set_role` implementation; removed redundant `closed` flag.
+- Fixed memory leaks in framing task lifecycle.
+- Aligned internal `_clean` level semantics with njs-modbus.
+- Added `destroy` guards to prevent double-free.
+
 ## [0.1.0] - 2025-05-11
 
 ### Added

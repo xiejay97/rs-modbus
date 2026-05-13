@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 
 pub struct SerialPhysicalLayer {
     port: Arc<std::sync::Mutex<Option<Box<dyn serialport::SerialPort>>>>,
-    is_open: AtomicBool,
+    is_open: Arc<AtomicBool>,
     is_opening: AtomicBool,
     is_destroyed: AtomicBool,
     path: String,
@@ -31,7 +31,7 @@ impl SerialPhysicalLayer {
         let (close_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             port: Arc::new(std::sync::Mutex::new(None)),
-            is_open: AtomicBool::new(false),
+            is_open: Arc::new(AtomicBool::new(false)),
             is_opening: AtomicBool::new(false),
             is_destroyed: AtomicBool::new(false),
             path,
@@ -138,13 +138,7 @@ impl PhysicalLayer for SerialPhysicalLayer {
             // Natural exit (port errored or removed). Emit close events
             // exactly once via the is_open transition gate, so close() and
             // this task don't both fire the listeners on the same session.
-            let was_open = if let Ok(mut g) = is_open_for_task.lock() {
-                let prev = *g;
-                *g = false;
-                prev
-            } else {
-                false
-            };
+            let was_open = is_open_for_task.swap(false, Ordering::AcqRel);
             if was_open {
                 let _ = connection_close_tx.send(conn_id_for_task);
                 let _ = close_tx.send(());
@@ -164,9 +158,9 @@ impl PhysicalLayer for SerialPhysicalLayer {
         let data = data.to_vec();
         let write_tx = self.write_tx.clone();
         tokio::task::spawn_blocking(move || {
-            let mut guard = port.lock().map_err(|_| {
-                ModbusError::ConnectionError("serial port poisoned".to_string())
-            })?;
+            let mut guard = port
+                .lock()
+                .map_err(|_| ModbusError::ConnectionError("serial port poisoned".to_string()))?;
             if let Some(ref mut port) = *guard {
                 use std::io::Write;
                 port.write_all(&data)

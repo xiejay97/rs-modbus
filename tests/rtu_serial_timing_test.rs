@@ -35,10 +35,7 @@ impl FakeSerialPhysicalLayer {
         })
     }
 
-    fn inject(&self,
-        data: Vec<u8>,
-        connection: ConnectionId,
-    ) {
+    fn inject(&self, data: Vec<u8>, connection: ConnectionId) {
         let response: ResponseFn = Arc::new(|_| Box::pin(async { Ok(()) }));
         let _ = self.data_tx.send(DataEvent {
             data,

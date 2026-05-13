@@ -1,7 +1,9 @@
 use crate::error::{get_code_by_error, get_error_by_code, ErrorCode, ModbusError};
 use crate::layers::application::{ApplicationLayer, ApplicationProtocol, ApplicationRole};
 use crate::layers::physical::{ConnectionId, PhysicalLayer, ResponseFn};
-use crate::types::{AddressRange, ApplicationDataUnit, CustomFunctionCode, FramedDataUnit, ServerId};
+use crate::types::{
+    AddressRange, ApplicationDataUnit, CustomFunctionCode, FramedDataUnit, ServerId,
+};
 use crate::utils::{check_range, pack_coils, pack_registers};
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -57,7 +59,7 @@ pub trait ModbusSlaveModel: Send + Sync {
     async fn write_single_register(&self, _address: u16, _value: u16) -> Result<(), ModbusError> {
         Err(ModbusError::IllegalFunction)
     }
-    /// Default: loop `write_single_register`. See [`write_multiple_coils`].
+    /// Default: loop `write_single_register`. See `write_multiple_coils`.
     async fn write_multiple_registers(
         &self,
         address: u16,
@@ -213,7 +215,15 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                             let cfs = Arc::clone(&custom_fcs);
                             let locks = Arc::clone(&address_locks);
                             tokio::spawn(async move {
-                                Self::process_frame(&app, &mdls, &cfs, &locks, frame, framing.response).await;
+                                Self::process_frame(
+                                    &app,
+                                    &mdls,
+                                    &cfs,
+                                    &locks,
+                                    frame,
+                                    framing.response,
+                                )
+                                .await;
                             });
                         } else {
                             // Per-connection FIFO: push onto this
@@ -417,7 +427,15 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         };
         if should_spawn {
             tokio::spawn(async move {
-                Self::drain_loop(queues, application, models, custom_fcs, address_locks, connection).await;
+                Self::drain_loop(
+                    queues,
+                    application,
+                    models,
+                    custom_fcs,
+                    address_locks,
+                    connection,
+                )
+                .await;
             });
         }
     }
@@ -446,7 +464,12 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             match next {
                 Some((frame, response)) => {
                     Self::process_frame(
-                        &application, &models, &custom_fcs, &address_locks, frame, response,
+                        &application,
+                        &models,
+                        &custom_fcs,
+                        &address_locks,
+                        frame,
+                        response,
                     )
                     .await;
                 }
@@ -558,10 +581,24 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                     Self::handle_fc17(application, model, &frame.adu, Arc::clone(&response)).await
                 }
                 0x16 => {
-                    Self::handle_fc22(application, model, address_locks, &frame.adu, Arc::clone(&response)).await
+                    Self::handle_fc22(
+                        application,
+                        model,
+                        address_locks,
+                        &frame.adu,
+                        Arc::clone(&response),
+                    )
+                    .await
                 }
                 0x17 => {
-                    Self::handle_fc23(application, model, address_locks, &frame.adu, Arc::clone(&response)).await
+                    Self::handle_fc23(
+                        application,
+                        model,
+                        address_locks,
+                        &frame.adu,
+                        Arc::clone(&response),
+                    )
+                    .await
                 }
                 0x2b => {
                     Self::handle_fc43_14(application, model, &frame.adu, Arc::clone(&response))
@@ -570,8 +607,11 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
                 _ => {
                     if let Some(cfc) = custom_fcs.get(&frame.adu.fc) {
                         if let Some(ref handler) = cfc.handle {
-                            let handler_clone: std::sync::Arc<dyn Fn(Vec<u8>, u8) -> crate::types::CustomFcHandleResult + Send + Sync> =
-                                Arc::clone(handler);
+                            let handler_clone: std::sync::Arc<
+                                dyn Fn(Vec<u8>, u8) -> crate::types::CustomFcHandleResult
+                                    + Send
+                                    + Sync,
+                            > = Arc::clone(handler);
                             let pdu = frame.adu.data.clone();
                             match handler_clone(pdu, frame.adu.unit).await {
                                 Ok(response_data) => {
@@ -1156,11 +1196,12 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             })
             .collect();
 
-        let write_addresses: Vec<u16> =
-            (0..write_length).map(|i| write_address + i).collect();
+        let write_addresses: Vec<u16> = (0..write_length).map(|i| write_address + i).collect();
 
         let write_result = Self::with_address_lock(address_locks, &write_addresses, || async {
-            model.write_multiple_registers(write_address, &write_values).await
+            model
+                .write_multiple_registers(write_address, &write_values)
+                .await
         })
         .await;
 
@@ -1345,7 +1386,10 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
     pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
         self.application.add_custom_function_code(cfc.clone());
-        self.custom_function_codes.lock().unwrap().insert(cfc.fc, cfc);
+        self.custom_function_codes
+            .lock()
+            .unwrap()
+            .insert(cfc.fc, cfc);
     }
 
     pub fn remove_custom_function_code(&self, fc: u8) {

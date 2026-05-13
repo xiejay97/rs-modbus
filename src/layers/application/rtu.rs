@@ -143,7 +143,6 @@ impl RtuBuffer {
     }
 }
 
-
 impl RtuApplicationLayer {
     /// Build an RTU application layer bound to `physical`.
     ///
@@ -160,8 +159,7 @@ impl RtuApplicationLayer {
         physical: Arc<P>,
         options: RtuApplicationLayerOptions,
     ) -> Arc<Self> {
-        let (interval_ms, inter_char_ms) =
-            compute_interval_ms(physical.layer_type(), options);
+        let (interval_ms, inter_char_ms) = compute_interval_ms(physical.layer_type(), options);
 
         let (framing_tx, _) = broadcast::channel(64);
         let (framing_error_tx, _) = broadcast::channel(64);
@@ -230,7 +228,10 @@ impl RtuApplicationLayer {
     /// Register a custom function code predictor. Required for any non-standard
     /// FC; without registration the frame is rejected with a framing error.
     pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
-        self.custom_function_codes.lock().unwrap().insert(cfc.fc, cfc);
+        self.custom_function_codes
+            .lock()
+            .unwrap()
+            .insert(cfc.fc, cfc);
     }
 
     pub fn remove_custom_function_code(&self, fc: u8) {
@@ -303,7 +304,9 @@ fn process_data_event(
     let strict = app.interval_ms > 0;
 
     let mut guard = buffers.lock().unwrap();
-    let mut buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
+    let mut buffer = guard
+        .entry(Arc::clone(&connection))
+        .or_insert_with(RtuBuffer::new);
 
     // t1.5 expiry from previous gap: if new data arrives after t1.5 fired,
     // the in-progress frame is corrupt.
@@ -314,7 +317,9 @@ fn process_data_event(
         drop(guard);
         let _ = framing_error_tx.send(ModbusError::T1_5Exceeded);
         guard = buffers.lock().unwrap();
-        buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
+        buffer = guard
+            .entry(Arc::clone(&connection))
+            .or_insert_with(RtuBuffer::new);
     } else {
         buffer.t15_expired = false;
     }
@@ -343,7 +348,9 @@ fn process_data_event(
                 strict,
             );
             guard = buffers.lock().unwrap();
-            buffer = guard.entry(Arc::clone(&connection)).or_insert_with(RtuBuffer::new);
+            buffer = guard
+                .entry(Arc::clone(&connection))
+                .or_insert_with(RtuBuffer::new);
             if buffer.available() == 0 {
                 let _ = framing_error_tx.send(ModbusError::InvalidData);
                 buffer.clear();
@@ -403,8 +410,7 @@ fn process_data_event(
                 let buffers_ic = Arc::clone(buffers);
                 let conn_ic = Arc::clone(&connection);
                 let inter_char_timer = tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(inter_char as u64))
-                        .await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(inter_char as u64)).await;
                     let mut guard = buffers_ic.lock().unwrap();
                     if let Some(b) = guard.get_mut(&conn_ic) {
                         b.t15_expired = true;

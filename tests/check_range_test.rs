@@ -20,31 +20,17 @@ fn single_segment_normal_range_still_works() {
 
 #[test]
 fn multi_segment_with_single_point_value_at_single_point_passes() {
-    assert!(
-        check_range(&[5],
-            &[(5, 5), (10, 20)],
-        )
-    );
+    assert!(check_range(&[5], &[(5, 5), (10, 20)],));
 }
 
 #[test]
 fn multi_segment_with_single_point_value_in_normal_segment_passes() {
-    assert!(
-        check_range(
-            &[15],
-            &[(5, 5), (10, 20)],
-        )
-    );
+    assert!(check_range(&[15], &[(5, 5), (10, 20)],));
 }
 
 #[test]
 fn multi_segment_with_single_point_value_outside_all_rejects() {
-    assert!(
-        !check_range(
-            &[999],
-            &[(5, 5), (10, 20)],
-        )
-    );
+    assert!(!check_range(&[999], &[(5, 5), (10, 20)],));
 }
 
 #[test]

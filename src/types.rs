@@ -35,7 +35,7 @@ pub struct FramedDataUnit {
 
 /// FC17 Server ID. Modbus V1.1b3 §6.17 leaves the Server ID length as
 /// device-specific (N bytes), so multi-byte IDs are supported via
-/// [`ServerId::Multi`]. Mirrors njs-modbus `ServerId { serverId: number | number[] }`.
+/// multi-byte. Mirrors njs-modbus `ServerId { serverId: number | number[] }`.
 #[derive(Debug, Clone)]
 pub struct ServerId {
     /// Server ID bytes — typically 1 byte, but the spec allows N bytes.
@@ -94,8 +94,7 @@ pub type CustomFcHandleResult =
 
 /// Slave-side handler: receives PDU payload (bytes after `fc`, before CRC) and
 /// the unit ID being addressed; must return the PDU payload of the response.
-pub type CustomFcHandler =
-    Arc<dyn Fn(Vec<u8>, u8) -> CustomFcHandleResult + Send + Sync + 'static>;
+pub type CustomFcHandler = Arc<dyn Fn(Vec<u8>, u8) -> CustomFcHandleResult + Send + Sync + 'static>;
 
 /// Defines a non-standard / user-defined Modbus function code. Mirrors
 /// njs-modbus `CustomFunctionCode`.
@@ -235,4 +234,3 @@ mod tests {
         assert!(cfc.handle.is_none());
     }
 }
-
