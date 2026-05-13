@@ -152,6 +152,10 @@ A safe lower bound is the RTU t3.5 inter-frame silence (e.g. ~4 ms at 9600 baud,
 Modbus TCP/UDP do not require this delay (TCP gives synchronous acks; broadcasting on TCP
 is uncommon anyway).
 
+## Related Projects
+
+- [njs-modbus](https://github.com/xiejay97/njs-modbus) — The Node.js/TypeScript reference implementation that `rs-modbus` mirrors in layer architecture and protocol semantics.
+
 ## License
 
 MIT
