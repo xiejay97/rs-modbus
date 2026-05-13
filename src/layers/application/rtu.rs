@@ -28,21 +28,11 @@ pub enum FrameInterval {
 ///
 /// **Breaking change (v2)**: the constructor no longer takes separate
 /// positional arguments; all timing parameters live here.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RtuApplicationLayerOptions {
     pub interval_between_frames: Option<FrameInterval>,
     pub inter_char_timeout: Option<FrameInterval>,
     pub baud_rate: Option<u32>,
-}
-
-impl Default for RtuApplicationLayerOptions {
-    fn default() -> Self {
-        Self {
-            interval_between_frames: None,
-            inter_char_timeout: None,
-            baud_rate: None,
-        }
-    }
 }
 
 pub struct RtuApplicationLayer {
@@ -310,7 +300,7 @@ fn process_data_event(
 
     // t1.5 expiry from previous gap: if new data arrives after t1.5 fired,
     // the in-progress frame is corrupt.
-    if buffer.t15_expired && buffer.len() > 0 {
+    if buffer.t15_expired && !buffer.is_empty() {
         buffer.start = 0;
         buffer.end = 0;
         buffer.t15_expired = false;
@@ -552,7 +542,7 @@ fn try_extract(
 }
 
 fn check_expected(buffer: &[u8], expected: usize) -> ExtractResult {
-    if expected > MAX_FRAME_LENGTH || expected < MIN_FRAME_LENGTH {
+    if !(MIN_FRAME_LENGTH..=MAX_FRAME_LENGTH).contains(&expected) {
         return ExtractResult::Invalid;
     }
     if buffer.len() < expected {
@@ -597,7 +587,7 @@ fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
 #[async_trait::async_trait]
 impl ApplicationLayer for RtuApplicationLayer {
     fn set_role(&self, role: ApplicationRole) -> Result<(), ModbusError> {
-        crate::layers::application::set_role_impl(&mut *self.role.lock().unwrap(), role)
+        crate::layers::application::set_role_impl(&mut self.role.lock().unwrap(), role)
     }
 
     fn role(&self) -> Option<ApplicationRole> {

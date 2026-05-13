@@ -267,7 +267,7 @@ fn decode_payload(payload: &[u8]) -> Result<(ApplicationDataUnit, Vec<u8>), Modb
 #[async_trait::async_trait]
 impl ApplicationLayer for AsciiApplicationLayer {
     fn set_role(&self, role: ApplicationRole) -> Result<(), ModbusError> {
-        crate::layers::application::set_role_impl(&mut *self.role.lock().unwrap(), role)
+        crate::layers::application::set_role_impl(&mut self.role.lock().unwrap(), role)
     }
 
     fn role(&self) -> Option<ApplicationRole> {

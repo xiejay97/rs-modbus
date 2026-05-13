@@ -351,7 +351,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        let mut sorted: Vec<u16> = addresses.iter().copied().collect();
+        let mut sorted: Vec<u16> = addresses.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
 
@@ -401,6 +401,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     /// Push a frame onto the per-connection queue. If no drain task is
     /// currently running for this connection, spawn one; otherwise the
     /// already-running drain picks the new item up on its next iteration.
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue_and_drain(
         queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,

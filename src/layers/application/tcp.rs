@@ -167,7 +167,7 @@ fn decode_inner(data: &[u8]) -> Result<ApplicationDataUnit, ModbusError> {
 #[async_trait::async_trait]
 impl ApplicationLayer for TcpApplicationLayer {
     fn set_role(&self, role: ApplicationRole) -> Result<(), ModbusError> {
-        crate::layers::application::set_role_impl(&mut *self.role.lock().unwrap(), role)
+        crate::layers::application::set_role_impl(&mut self.role.lock().unwrap(), role)
     }
 
     fn role(&self) -> Option<ApplicationRole> {

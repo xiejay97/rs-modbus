@@ -6,7 +6,6 @@
 //! spec wording.
 
 /// Standard Modbus function codes (V1.1b3 §6).
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FunctionCode {
@@ -42,7 +41,6 @@ pub const COIL_OFF: u16 = 0x0000;
 pub const MEI_READ_DEVICE_ID: u8 = 0x0e;
 
 /// Read Device ID code values inside an FC 0x2B / MEI 0x0E request.
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReadDeviceIdCode {
@@ -53,7 +51,6 @@ pub enum ReadDeviceIdCode {
 }
 
 /// Conformity level reported in an FC 0x2B / MEI 0x0E response.
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ConformityLevel {

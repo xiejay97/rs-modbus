@@ -108,6 +108,7 @@ pub type CustomFcHandler = Arc<dyn Fn(Vec<u8>, u8) -> CustomFcHandleResult + Sen
 /// length (PDU + 2-byte CRC) from leading bytes; they are required so the
 /// framing FSM can advance without the deleted sliding-window CRC fallback.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 pub struct CustomFunctionCode {
     /// Function code value (must fit in `u8`).
     pub fc: u8,
