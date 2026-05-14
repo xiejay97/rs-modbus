@@ -53,7 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Read input registers: {:?}", ir);
 
     // Write multiple registers
-    let _ = master.write_multiple_registers(1, 10, &[0x1111, 0x2222, 0x3333], None).await?;
+    let _ = master
+        .write_multiple_registers(1, 10, &[0x1111, 0x2222, 0x3333], None)
+        .await?;
     println!("Write multiple registers OK");
 
     // Read back
@@ -61,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Read back multiple registers: {:?}", mr);
 
     // Mask write register
-    let _ = master.mask_write_register(1, 20, 0x00FF, 0xFF00, None).await?;
+    let _ = master
+        .mask_write_register(1, 20, 0x00FF, 0xFF00, None)
+        .await?;
     println!("Mask write register OK");
 
     // Read back
@@ -69,7 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Read back after mask write: {:?}", mwr);
 
     // Read and write multiple registers
-    let raw = master.read_and_write_multiple_registers(1, 10, 2, 12, &[0xaaaa, 0xbbbb], None).await?;
+    let raw = master
+        .read_and_write_multiple_registers(1, 10, 2, 12, &[0xaaaa, 0xbbbb], None)
+        .await?;
     println!("Read-write multiple registers read: {:?}", raw);
 
     // Read back write addresses
@@ -81,7 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Report server ID: {:?}", sid);
 
     // Read device identification
-    let dev = master.read_device_identification(1, 0x01, 0x00, None).await?;
+    let dev = master
+        .read_device_identification(1, 0x01, 0x00, None)
+        .await?;
     println!("Read device identification: {:?}", dev);
 
     println!("\n=== ALL INTEROP TESTS PASSED ===");

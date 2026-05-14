@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-05-14
+
+### Added
+
+- `open` / `open_by_id` 方法接受 `Option<OpenOptions>` 参数，用于配置连接超时。
+- `MasterResponse` 结构体替代元组，为响应数据提供具名字段。
+- `ModbusMaster` / `ModbusSlave` 新增 `is_open()`、`is_closed()`、`has_connections()` 状态查询方法。
+
+### Changed
+
+- **BREAKING**: `ModbusMaster::open` / `open_by_id` 和 `ModbusSlave::open` 签名改为接收 `Option<OpenOptions>`。
+- **BREAKING**: `ModbusMaster` 所有读写方法的返回类型从 `(Option<FunctionCode>, Vec<u8>)` 改为 `MasterResponse`。
+
 ## [1.0.0] - 2026-05-13
 
 ### Added

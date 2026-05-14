@@ -27,7 +27,9 @@ impl SimpleModel {
 
 #[async_trait]
 impl ModbusSlaveModel for SimpleModel {
-    fn unit(&self) -> u8 { 1 }
+    fn unit(&self) -> u8 {
+        1
+    }
 
     fn address_range(&self) -> AddressRange {
         AddressRange {
@@ -38,56 +40,111 @@ impl ModbusSlaveModel for SimpleModel {
         }
     }
 
-    async fn read_coils(&self, address: u16, length: u16) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
+    async fn read_coils(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
         let guard = self.coils.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&false)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
     }
 
-    async fn write_single_coil(&self, address: u16, value: bool) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_single_coil(
+        &self,
+        address: u16,
+        value: bool,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         self.coils.lock().await.insert(address, value);
         Ok(())
     }
 
-    async fn write_multiple_coils(&self, address: u16, values: &[bool]) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_multiple_coils(
+        &self,
+        address: u16,
+        values: &[bool],
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         for (i, v) in values.iter().enumerate() {
             self.coils.lock().await.insert(address + i as u16, *v);
         }
         Ok(())
     }
 
-    async fn read_discrete_inputs(&self, address: u16, length: u16) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
+    async fn read_discrete_inputs(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<bool>, rs_modbus::error::ModbusError> {
         let guard = self.discrete_inputs.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&false)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&false))
+            .collect())
     }
 
-    async fn read_holding_registers(&self, address: u16, length: u16) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
+    async fn read_holding_registers(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
         let guard = self.holding_registers.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&0)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
     }
 
-    async fn write_single_register(&self, address: u16, value: u16) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_single_register(
+        &self,
+        address: u16,
+        value: u16,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         self.holding_registers.lock().await.insert(address, value);
         Ok(())
     }
 
-    async fn write_multiple_registers(&self, address: u16, values: &[u16]) -> Result<(), rs_modbus::error::ModbusError> {
+    async fn write_multiple_registers(
+        &self,
+        address: u16,
+        values: &[u16],
+    ) -> Result<(), rs_modbus::error::ModbusError> {
         for (i, v) in values.iter().enumerate() {
-            self.holding_registers.lock().await.insert(address + i as u16, *v);
+            self.holding_registers
+                .lock()
+                .await
+                .insert(address + i as u16, *v);
         }
         Ok(())
     }
 
-    async fn read_input_registers(&self, address: u16, length: u16) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
+    async fn read_input_registers(
+        &self,
+        address: u16,
+        length: u16,
+    ) -> Result<Vec<u16>, rs_modbus::error::ModbusError> {
         let guard = self.input_registers.lock().await;
-        Ok((0..length).map(|i| *guard.get(&(address + i)).unwrap_or(&0)).collect())
+        Ok((0..length)
+            .map(|i| *guard.get(&(address + i)).unwrap_or(&0))
+            .collect())
     }
 
-    async fn mask_write_register(&self, address: u16, and_mask: u16, or_mask: u16) -> Result<(), rs_modbus::error::ModbusError> {
-        let current = *self.holding_registers.lock().await.get(&address).unwrap_or(&0);
-        self.holding_registers.lock().await.insert(address, (current & and_mask) | (or_mask & !and_mask));
+    async fn mask_write_register(
+        &self,
+        address: u16,
+        and_mask: u16,
+        or_mask: u16,
+    ) -> Result<(), rs_modbus::error::ModbusError> {
+        let current = *self
+            .holding_registers
+            .lock()
+            .await
+            .get(&address)
+            .unwrap_or(&0);
+        self.holding_registers
+            .lock()
+            .await
+            .insert(address, (current & and_mask) | (or_mask & !and_mask));
         Ok(())
     }
-
 
     async fn report_server_id(&self) -> Result<ServerId, rs_modbus::error::ModbusError> {
         Ok(ServerId {
@@ -97,7 +154,9 @@ impl ModbusSlaveModel for SimpleModel {
         })
     }
 
-    async fn read_device_identification(&self) -> Result<HashMap<u8, String>, rs_modbus::error::ModbusError> {
+    async fn read_device_identification(
+        &self,
+    ) -> Result<HashMap<u8, String>, rs_modbus::error::ModbusError> {
         let mut map = HashMap::new();
         map.insert(0x00, "VendorName".to_string());
         map.insert(0x01, "ProductCode".to_string());

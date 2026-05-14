@@ -406,7 +406,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         length: u16,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
-        self.read_discrete_inputs(unit, address, length, timeout_ms).await
+        self.read_discrete_inputs(unit, address, length, timeout_ms)
+            .await
     }
 
     // FC3 - Read Holding Registers
@@ -458,7 +459,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         length: u16,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
-        self.read_holding_registers(unit, address, length, timeout_ms).await
+        self.read_holding_registers(unit, address, length, timeout_ms)
+            .await
     }
 
     // FC4 - Read Input Registers
@@ -510,7 +512,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         length: u16,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
-        self.read_input_registers(unit, address, length, timeout_ms).await
+        self.read_input_registers(unit, address, length, timeout_ms)
+            .await
     }
 
     // FC5 - Write Single Coil
@@ -562,7 +565,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         value: bool,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<bool>>, ModbusError> {
-        self.write_single_coil(unit, address, value, timeout_ms).await
+        self.write_single_coil(unit, address, value, timeout_ms)
+            .await
     }
 
     // FC6 - Write Single Register
@@ -613,7 +617,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         value: u16,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<u16>>, ModbusError> {
-        self.write_single_register(unit, address, value, timeout_ms).await
+        self.write_single_register(unit, address, value, timeout_ms)
+            .await
     }
 
     // FC15 - Write Multiple Coils
@@ -676,7 +681,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         values: &[bool],
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
-        self.write_multiple_coils(unit, address, values, timeout_ms).await
+        self.write_multiple_coils(unit, address, values, timeout_ms)
+            .await
     }
 
     // FC16 - Write Multiple Registers
@@ -733,7 +739,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         values: &[u16],
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
-        self.write_multiple_registers(unit, address, values, timeout_ms).await
+        self.write_multiple_registers(unit, address, values, timeout_ms)
+            .await
     }
 
     // FC17 - Report Server ID
@@ -793,7 +800,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         server_id_length: usize,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<ServerId>>, ModbusError> {
-        self.report_server_id(unit, server_id_length, timeout_ms).await
+        self.report_server_id(unit, server_id_length, timeout_ms)
+            .await
     }
 
     // FC22 - Mask Write Register
@@ -847,7 +855,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         or_mask: u16,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<(u16, u16)>>, ModbusError> {
-        self.mask_write_register(unit, address, and_mask, or_mask, timeout_ms).await
+        self.mask_write_register(unit, address, and_mask, or_mask, timeout_ms)
+            .await
     }
 
     // FC23 - Read/Write Multiple Registers
@@ -910,7 +919,15 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         write_values: &[u16],
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
-        self.read_and_write_multiple_registers(unit, read_address, read_length, write_address, write_values, timeout_ms).await
+        self.read_and_write_multiple_registers(
+            unit,
+            read_address,
+            read_length,
+            write_address,
+            write_values,
+            timeout_ms,
+        )
+        .await
     }
 
     // FC43/14 - Read Device Identification
@@ -999,7 +1016,8 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         object_id: u8,
         timeout_ms: Option<u64>,
     ) -> Result<Option<MasterResponse<DeviceIdentification>>, ModbusError> {
-        self.read_device_identification(unit, read_device_id_code, object_id, timeout_ms).await
+        self.read_device_identification(unit, read_device_id_code, object_id, timeout_ms)
+            .await
     }
 
     pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {

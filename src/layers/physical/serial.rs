@@ -171,17 +171,15 @@ impl PhysicalLayer for SerialPhysicalLayer {
                         let data = buf[..n].to_vec();
                         let write_port_for_response = Arc::clone(&write_port_for_response);
                         let response: ResponseFn = Arc::new(move |reply: Vec<u8>| {
-                            let write_port_for_response =
-                                Arc::clone(&write_port_for_response);
+                            let write_port_for_response = Arc::clone(&write_port_for_response);
                             Box::pin(async move {
                                 tokio::task::spawn_blocking(move || {
                                     use std::io::Write;
-                                    let mut g =
-                                        write_port_for_response.lock().map_err(|_| {
-                                            ModbusError::ConnectionError(
-                                                "serial port poisoned".to_string(),
-                                            )
-                                        })?;
+                                    let mut g = write_port_for_response.lock().map_err(|_| {
+                                        ModbusError::ConnectionError(
+                                            "serial port poisoned".to_string(),
+                                        )
+                                    })?;
                                     match g.as_mut() {
                                         Some(p) => p.write_all(&reply).map_err(|e| {
                                             ModbusError::ConnectionError(e.to_string())

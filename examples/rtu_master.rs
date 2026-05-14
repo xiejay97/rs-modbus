@@ -1,12 +1,8 @@
 // Run with: cargo run --example rtu_master --features serial
-#[cfg(feature = "serial")]
 use rs_modbus::layers::application::{RtuApplicationLayer, RtuApplicationLayerOptions};
-#[cfg(feature = "serial")]
 use rs_modbus::layers::physical::{SerialPhysicalLayer, SerialPhysicalLayerOptions};
-#[cfg(feature = "serial")]
 use rs_modbus::master::{ModbusMaster, ModbusMasterOptions};
 
-#[cfg(feature = "serial")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
@@ -43,10 +39,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     master.destroy().await;
     Ok(())
-}
-
-#[cfg(not(feature = "serial"))]
-fn main() {
-    eprintln!("This example requires the 'serial' feature.");
-    eprintln!("Run with: cargo run --example rtu_master --features serial");
 }

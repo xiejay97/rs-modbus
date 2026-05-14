@@ -1,28 +1,18 @@
 // Run with: cargo run --example rtu_slave --features serial
-#[cfg(feature = "serial")]
 use async_trait::async_trait;
-#[cfg(feature = "serial")]
 use rs_modbus::layers::application::{RtuApplicationLayer, RtuApplicationLayerOptions};
-#[cfg(feature = "serial")]
 use rs_modbus::layers::physical::{SerialPhysicalLayer, SerialPhysicalLayerOptions};
-#[cfg(feature = "serial")]
 use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
-#[cfg(feature = "serial")]
 use rs_modbus::types::{AddressRange, ServerId};
-#[cfg(feature = "serial")]
 use std::collections::HashMap;
-#[cfg(feature = "serial")]
 use std::sync::Arc;
-#[cfg(feature = "serial")]
 use tokio::sync::Mutex;
 
-#[cfg(feature = "serial")]
 struct SimpleModel {
     coils: Arc<Mutex<HashMap<u16, bool>>>,
     holding_registers: Arc<Mutex<HashMap<u16, u16>>>,
 }
 
-#[cfg(feature = "serial")]
 impl SimpleModel {
     fn new() -> Self {
         Self {
@@ -32,7 +22,6 @@ impl SimpleModel {
     }
 }
 
-#[cfg(feature = "serial")]
 #[async_trait]
 impl ModbusSlaveModel for SimpleModel {
     fn unit(&self) -> u8 {
@@ -106,7 +95,6 @@ impl ModbusSlaveModel for SimpleModel {
     }
 }
 
-#[cfg(feature = "serial")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
@@ -139,10 +127,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     slave.destroy().await;
     Ok(())
-}
-
-#[cfg(not(feature = "serial"))]
-fn main() {
-    eprintln!("This example requires the 'serial' feature.");
-    eprintln!("Run with: cargo run --example rtu_slave --features serial");
 }

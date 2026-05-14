@@ -175,7 +175,9 @@ impl PhysicalLayer for UdpPhysicalLayer {
         let bind_addr = if self.is_server {
             options.or(preset).unwrap_or_else(|| "[::]:502".to_string())
         } else {
-            options.or(preset).unwrap_or_else(|| "0.0.0.0:0".to_string())
+            options
+                .or(preset)
+                .unwrap_or_else(|| "0.0.0.0:0".to_string())
         };
         let socket = match UdpSocket::bind(&bind_addr).await {
             Ok(s) => Arc::new(s),

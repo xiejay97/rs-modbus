@@ -76,7 +76,11 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         let addr = if let Some(addr) = options {
             addr
         } else {
-            self.addr.lock().await.clone().unwrap_or_else(|| "127.0.0.1:502".to_string())
+            self.addr
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1:502".to_string())
         };
         let stream = match TcpStream::connect(&addr).await {
             Ok(s) => s,

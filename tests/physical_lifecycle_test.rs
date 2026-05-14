@@ -120,7 +120,10 @@ async fn tcp_client_rejects_open_and_write_after_destroy() {
     phy.set_addr(addr).await;
     phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(
+        phy.open(None).await,
+        Err(ModbusError::PortDestroyed)
+    ));
     assert!(matches!(
         phy.write(&[0]).await,
         Err(ModbusError::PortNotOpen)
@@ -230,7 +233,10 @@ async fn tcp_server_rejects_open_after_destroy() {
     phy.set_addr("127.0.0.1:0".to_string()).await;
     phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(
+        phy.open(None).await,
+        Err(ModbusError::PortDestroyed)
+    ));
 }
 
 // ===== UdpPhysicalLayer — lifecycle (server mode) =====
@@ -301,7 +307,10 @@ async fn udp_rejects_open_after_destroy() {
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(
+        phy.open(None).await,
+        Err(ModbusError::PortDestroyed)
+    ));
 }
 
 // ===== SerialPhysicalLayer — lifecycle (no MockBinding in Rust) =====
@@ -324,7 +333,10 @@ mod serial_lifecycle {
             ..Default::default()
         });
         phy.destroy().await;
-        assert!(matches!(phy.open(()).await, Err(ModbusError::PortDestroyed)));
+        assert!(matches!(
+            phy.open(()).await,
+            Err(ModbusError::PortDestroyed)
+        ));
     }
 
     #[tokio::test]

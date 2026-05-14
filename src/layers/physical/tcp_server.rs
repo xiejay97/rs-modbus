@@ -84,7 +84,11 @@ impl PhysicalLayer for TcpServerPhysicalLayer {
         let addr = if let Some(addr) = options {
             addr
         } else {
-            self.addr.lock().await.clone().unwrap_or_else(|| "[::]:502".to_string())
+            self.addr
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "[::]:502".to_string())
         };
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,

@@ -1,6 +1,6 @@
 [package]
 name = "rs-modbus"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Xie Jay <xiejay97@gmail.com>"]
 description = "A pure Rust implementation of MODBUS protocol."
