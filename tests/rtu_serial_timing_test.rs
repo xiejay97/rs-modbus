@@ -47,11 +47,13 @@ impl FakeSerialPhysicalLayer {
 
 #[async_trait::async_trait]
 impl PhysicalLayer for FakeSerialPhysicalLayer {
+    type OpenOptions = ();
+
     fn layer_type(&self) -> PhysicalLayerType {
         PhysicalLayerType::Serial
     }
 
-    async fn open(&self) -> Result<(), ModbusError> {
+    async fn open(&self, _options: Self::OpenOptions) -> Result<(), ModbusError> {
         Ok(())
     }
 

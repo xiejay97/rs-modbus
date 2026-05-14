@@ -96,6 +96,22 @@ pub type CustomFcHandleResult =
 /// the unit ID being addressed; must return the PDU payload of the response.
 pub type CustomFcHandler = Arc<dyn Fn(Vec<u8>, u8) -> CustomFcHandleResult + Send + Sync + 'static>;
 
+/// Response from a Modbus master request, mirroring njs-modbus `ReturnValue<T>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MasterResponse<T> {
+    pub transaction: Option<u16>,
+    pub unit: u8,
+    pub fc: u8,
+    pub data: T,
+    pub raw: Vec<u8>,
+}
+
+impl<T: PartialEq> PartialEq<T> for MasterResponse<T> {
+    fn eq(&self, other: &T) -> bool {
+        self.data == *other
+    }
+}
+
 /// Defines a non-standard / user-defined Modbus function code. Mirrors
 /// njs-modbus `CustomFunctionCode`.
 ///

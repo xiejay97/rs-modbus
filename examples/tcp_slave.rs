@@ -107,8 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.coils.lock().await.insert(0, true);
     model.coils.lock().await.insert(1, false);
 
-    slave.add(Box::new(model)).await;
-    slave.open().await?;
+    slave.add(Box::new(model));
+    slave.open(None).await?;
 
     println!("Slave listening on [::]:502 (default)");
 

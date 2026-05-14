@@ -71,13 +71,11 @@ async fn create_slow_slave(
     let slave = ModbusSlave::new(application, Arc::clone(&physical));
 
     let holding_registers = Arc::new(Mutex::new(HashMap::new()));
-    slave
-        .add(Box::new(SlowSlaveModel {
-            latency,
-            holding_registers: Arc::clone(&holding_registers),
-        }))
-        .await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(SlowSlaveModel {
+        latency,
+        holding_registers: Arc::clone(&holding_registers),
+    }));
+    slave.open(None).await.unwrap();
     (slave, physical, holding_registers)
 }
 
@@ -90,7 +88,7 @@ async fn create_master(
     physical.set_addr(addr).await;
     let application = TcpApplicationLayer::new(physical.clone());
     let master = ModbusMaster::new(application, physical, options);
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
     master
 }
 
@@ -394,7 +392,7 @@ async fn reopen_after_close_allows_new_requests() {
     assert_eq!(first, vec![0u16], "pre-close read works as a sanity check");
 
     master.close().await.expect("close should not error");
-    master.open().await.expect("reopen should succeed");
+    master.open(None).await.expect("reopen should succeed");
 
     let second = master.read_holding_registers(UNIT, 7, 1, None).await;
     match second {

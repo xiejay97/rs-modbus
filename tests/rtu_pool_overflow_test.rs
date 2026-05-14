@@ -25,7 +25,7 @@ fn rtu_request(unit: u8, fc: u8, payload: &[u8]) -> Vec<u8> {
 async fn pool_consumes_chunk_larger_than_pool_without_truncating() {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
 
     let app = RtuApplicationLayer::new(server.clone(), RtuApplicationLayerOptions::default());
@@ -35,7 +35,7 @@ async fn pool_consumes_chunk_larger_than_pool_without_truncating() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     // 80 frames x 8 bytes = 640 bytes, exceeding the 512-byte pool.
@@ -89,7 +89,7 @@ async fn pool_consumes_chunk_larger_than_pool_without_truncating() {
 async fn pool_emits_framing_error_when_chunk_exceeds_pool_and_no_valid_frame() {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
 
     let app = RtuApplicationLayer::new(server.clone(), RtuApplicationLayerOptions::default());
@@ -99,7 +99,7 @@ async fn pool_emits_framing_error_when_chunk_exceeds_pool_and_no_valid_frame() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     // 600 bytes of garbage: no valid RTU frame can be extracted

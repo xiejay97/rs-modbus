@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    master.open().await?;
+    master.open(None).await?;
 
     // Broadcast write (unit = 0) - no response expected
     let result = master.write_single_register(0, 100, 0x9999, None).await?;

@@ -175,8 +175,8 @@ async fn create_slave() -> (
         input_registers: Arc::clone(&input_registers),
     };
 
-    slave.add(Box::new(model)).await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(model));
+    slave.open(None).await.unwrap();
 
     (
         slave,
@@ -203,7 +203,7 @@ async fn create_master(
             concurrent: false,
         },
     );
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
     master
 }
 
@@ -217,7 +217,7 @@ async fn test_fc1_read_coils() {
     coils.lock().await.insert(2, true);
 
     let res = master.read_coils(UNIT, 0, 3, None).await.unwrap().unwrap();
-    assert_eq!(res, vec![true, false, true]);
+    assert_eq!(res.data, vec![true, false, true]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -237,7 +237,7 @@ async fn test_fc2_read_discrete_inputs() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res, vec![true, true, false]);
+    assert_eq!(res.data, vec![true, true, false]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -256,7 +256,7 @@ async fn test_fc3_read_holding_registers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res, vec![0x1234, 0x5678]);
+    assert_eq!(res.data, vec![0x1234, 0x5678]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -275,7 +275,7 @@ async fn test_fc4_read_input_registers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res, vec![0xabcd, 0xef01]);
+    assert_eq!(res.data, vec![0xabcd, 0xef01]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -290,7 +290,7 @@ async fn test_fc5_write_single_coil() {
         .write_single_coil(UNIT, 40, true, None)
         .await
         .unwrap();
-    assert_eq!(res, Some(true));
+    assert_eq!(res.map(|r| r.data), Some(true));
     assert!(*coils.lock().await.get(&40).unwrap());
 
     master.destroy().await;
@@ -306,7 +306,7 @@ async fn test_fc6_write_single_register() {
         .write_single_register(UNIT, 50, 0xdead, None)
         .await
         .unwrap();
-    assert_eq!(res, Some(0xdead));
+    assert_eq!(res.map(|r| r.data), Some(0xdead));
     assert_eq!(*holding_registers.lock().await.get(&50).unwrap(), 0xdead);
 
     master.destroy().await;
@@ -322,7 +322,7 @@ async fn test_fc15_write_multiple_coils() {
         .write_multiple_coils(UNIT, 60, &[true, false, true, true], None)
         .await
         .unwrap();
-    assert_eq!(res, Some(vec![true, false, true, true]));
+    assert_eq!(res.map(|r| r.data), Some(vec![true, false, true, true]));
 
     let guard = coils.lock().await;
     assert!(*guard.get(&60).unwrap());
@@ -343,7 +343,7 @@ async fn test_fc16_write_multiple_registers() {
         .write_multiple_registers(UNIT, 70, &[0x1111, 0x2222, 0x3333], None)
         .await
         .unwrap();
-    assert_eq!(res, Some(vec![0x1111, 0x2222, 0x3333]));
+    assert_eq!(res.map(|r| r.data), Some(vec![0x1111, 0x2222, 0x3333]));
 
     let guard = holding_registers.lock().await;
     assert_eq!(*guard.get(&70).unwrap(), 0x1111);
@@ -364,9 +364,9 @@ async fn test_fc17_report_server_id() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res.server_id, vec![UNIT]);
-    assert!(res.run_indicator_status);
-    assert_eq!(res.additional_data, vec![1, 2, 3]);
+    assert_eq!(res.data.server_id, vec![UNIT]);
+    assert!(res.data.run_indicator_status);
+    assert_eq!(res.data.additional_data, vec![1, 2, 3]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -383,7 +383,7 @@ async fn test_fc22_mask_write_register() {
         .mask_write_register(UNIT, 80, 0b00001111, 0b10101010, None)
         .await
         .unwrap();
-    assert_eq!(res, Some((0b00001111, 0b10101010)));
+    assert_eq!(res.map(|r| r.data), Some((0b00001111, 0b10101010)));
 
     #[allow(clippy::identity_op)]
     let expected = (0b11110000u16 & 0b00001111u16) | (0b10101010u16 & !0b00001111u16);
@@ -406,7 +406,7 @@ async fn test_fc23_read_and_write_multiple_registers() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res, vec![0xaaaa, 0xbbbb]);
+    assert_eq!(res.data, vec![0xaaaa, 0xbbbb]);
 
     let guard = holding_registers.lock().await;
     assert_eq!(*guard.get(&92).unwrap(), 0xcccc);
@@ -426,16 +426,16 @@ async fn test_fc43_14_read_device_identification() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(res.read_device_id_code, 0x01);
-    assert_eq!(res.conformity_level, 0x81);
-    assert!(!res.more_follows);
-    assert_eq!(res.objects.len(), 3);
-    assert_eq!(res.objects[0].id, 0x00);
-    assert_eq!(res.objects[0].value, "VendorName");
-    assert_eq!(res.objects[1].id, 0x01);
-    assert_eq!(res.objects[1].value, "ProductCode");
-    assert_eq!(res.objects[2].id, 0x02);
-    assert_eq!(res.objects[2].value, "MajorMinorRevision");
+    assert_eq!(res.data.read_device_id_code, 0x01);
+    assert_eq!(res.data.conformity_level, 0x81);
+    assert!(!res.data.more_follows);
+    assert_eq!(res.data.objects.len(), 3);
+    assert_eq!(res.data.objects[0].id, 0x00);
+    assert_eq!(res.data.objects[0].value, "VendorName");
+    assert_eq!(res.data.objects[1].id, 0x01);
+    assert_eq!(res.data.objects[1].value, "ProductCode");
+    assert_eq!(res.data.objects[2].id, 0x02);
+    assert_eq!(res.data.objects[2].value, "MajorMinorRevision");
 
     master.destroy().await;
     slave.destroy().await;
@@ -447,7 +447,7 @@ async fn test_broadcast_write() {
     let master = create_master(&server).await;
 
     let res = master.write_single_register(0, 100, 0x9999, None).await;
-    assert_eq!(res.unwrap(), None); // broadcast returns None
+    assert_eq!(res.unwrap().map(|r| r.data), None); // broadcast returns None
 
     // Wait a bit for the slave to process
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -483,9 +483,9 @@ async fn test_queue_ordering() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(res1, vec![0x0001]);
-    assert_eq!(res2, vec![0x0002]);
-    assert_eq!(res3, vec![0x0003]);
+    assert_eq!(res1.data, vec![0x0001]);
+    assert_eq!(res2.data, vec![0x0002]);
+    assert_eq!(res3.data, vec![0x0003]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -540,7 +540,7 @@ async fn test_illegal_data_address() {
         }
     }
 
-    slave.add(Box::new(RestrictedModel(restricted_model))).await;
+    slave.add(Box::new(RestrictedModel(restricted_model)));
 
     // Request to unit 2 with address out of range should get exception
     let res = master.read_coils(2, 0, 10, Some(200)).await;
@@ -644,13 +644,11 @@ async fn create_single_only_slave() -> (
     let coils = Arc::new(Mutex::new(HashMap::new()));
     let holding_registers = Arc::new(Mutex::new(HashMap::new()));
 
-    slave
-        .add(Box::new(SingleOnlyModel {
-            coils: Arc::clone(&coils),
-            holding_registers: Arc::clone(&holding_registers),
-        }))
-        .await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(SingleOnlyModel {
+        coils: Arc::clone(&coils),
+        holding_registers: Arc::clone(&holding_registers),
+    }));
+    slave.open(None).await.unwrap();
     (slave, physical, coils, holding_registers)
 }
 
@@ -665,7 +663,7 @@ async fn test_fc15_falls_back_to_write_single_coil() {
         .write_multiple_coils(UNIT, 100, &[true, false, true, true], None)
         .await
         .unwrap();
-    assert_eq!(result, Some(vec![true, false, true, true]));
+    assert_eq!(result.map(|r| r.data), Some(vec![true, false, true, true]));
 
     let guard = coils.lock().await;
     assert!(*guard.get(&100).unwrap());
@@ -686,7 +684,7 @@ async fn test_fc16_falls_back_to_write_single_register() {
         .write_multiple_registers(UNIT, 200, &[0x1111, 0x2222, 0x3333], None)
         .await
         .unwrap();
-    assert_eq!(result, Some(vec![0x1111, 0x2222, 0x3333]));
+    assert_eq!(result.map(|r| r.data), Some(vec![0x1111, 0x2222, 0x3333]));
 
     let guard = holding_registers.lock().await;
     assert_eq!(*guard.get(&200).unwrap(), 0x1111);

@@ -94,9 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    master.open().await?;
+    master.open(None).await?;
     let res = master.read_holding_registers(1, 0, 10, None).await?;
-    println!("{:?}", res);
+    println!("{:?}", res.map(|r| r.data));
     master.destroy().await;
 
     Ok(())
@@ -134,8 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application = TcpApplicationLayer::new(physical.clone());
     let slave = ModbusSlave::new(application, physical);
 
-    slave.add(Box::new(SimpleModel)).await;
-    slave.open().await?;
+    slave.add(Box::new(SimpleModel));
+    slave.open(None).await?;
 
     Ok(())
 }

@@ -36,11 +36,13 @@ impl FakeNetPhysicalLayer {
 
 #[async_trait::async_trait]
 impl PhysicalLayer for FakeNetPhysicalLayer {
+    type OpenOptions = ();
+
     fn layer_type(&self) -> PhysicalLayerType {
         PhysicalLayerType::Net
     }
 
-    async fn open(&self) -> Result<(), ModbusError> {
+    async fn open(&self, _options: Self::OpenOptions) -> Result<(), ModbusError> {
         Ok(())
     }
 

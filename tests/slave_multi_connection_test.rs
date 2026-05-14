@@ -73,13 +73,11 @@ async fn create_slave(options: ModbusSlaveOptions) -> SlaveEnv {
 
     let latency_by_address: Arc<Mutex<HashMap<u16, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let processed: Arc<Mutex<Vec<u16>>> = Arc::new(Mutex::new(Vec::new()));
-    slave
-        .add(Box::new(ToggleableLatencyModel {
-            latency_by_address: Arc::clone(&latency_by_address),
-            processed: Arc::clone(&processed),
-        }))
-        .await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(ToggleableLatencyModel {
+        latency_by_address: Arc::clone(&latency_by_address),
+        processed: Arc::clone(&processed),
+    }));
+    slave.open(None).await.unwrap();
     SlaveEnv {
         slave,
         physical,
@@ -97,7 +95,7 @@ async fn create_master(
     physical.set_addr(addr).await;
     let application = TcpApplicationLayer::new(physical.clone());
     let master = ModbusMaster::new(application, physical, options);
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
     master
 }
 
@@ -301,7 +299,7 @@ async fn queued_items_dropped_on_connection_close() {
         .set_addr(env.physical.get_addr().await.unwrap())
         .await;
     let client_app = TcpApplicationLayer::new(client_phy.clone());
-    client_phy.open().await.unwrap();
+    client_phy.open(None).await.unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let mk_read = |address: u16, tid: u16| -> Vec<u8> {

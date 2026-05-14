@@ -54,11 +54,13 @@ impl TcpClientPhysicalLayer {
 
 #[async_trait::async_trait]
 impl PhysicalLayer for TcpClientPhysicalLayer {
+    type OpenOptions = Option<String>;
+
     fn layer_type(&self) -> PhysicalLayerType {
         PhysicalLayerType::Net
     }
 
-    async fn open(&self) -> Result<(), ModbusError> {
+    async fn open(&self, options: Self::OpenOptions) -> Result<(), ModbusError> {
         if *self.is_destroyed.lock().await {
             return Err(ModbusError::PortDestroyed);
         }
@@ -71,12 +73,11 @@ impl PhysicalLayer for TcpClientPhysicalLayer {
         }
         *self.is_opening.lock().await = true;
 
-        let addr = self
-            .addr
-            .lock()
-            .await
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1:502".to_string());
+        let addr = if let Some(addr) = options {
+            addr
+        } else {
+            self.addr.lock().await.clone().unwrap_or_else(|| "127.0.0.1:502".to_string())
+        };
         let stream = match TcpStream::connect(&addr).await {
             Ok(s) => s,
             Err(e) => {

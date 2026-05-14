@@ -94,7 +94,7 @@ async fn per_rinfo_distinct_connection_ids() {
     let phy = UdpPhysicalLayer::new_server();
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.local_addr().await.unwrap();
 
     let s1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -118,7 +118,7 @@ async fn same_rinfo_keeps_stable_connection_id() {
     let phy = UdpPhysicalLayer::new_server();
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.local_addr().await.unwrap();
 
     let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -148,7 +148,7 @@ async fn idle_rinfo_evicted_after_timeout() {
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
     let (closes, _close_task) = spawn_connection_close_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.local_addr().await.unwrap();
 
     let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -179,7 +179,7 @@ async fn idle_timeout_zero_disables_eviction() {
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
     let (closes, _close_task) = spawn_connection_close_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.local_addr().await.unwrap();
 
     let s = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -203,7 +203,7 @@ async fn close_emits_connection_close_per_active_rinfo() {
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
     let (closes, _close_task) = spawn_connection_close_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.local_addr().await.unwrap();
 
     let sa = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -239,7 +239,7 @@ async fn client_mode_drops_datagrams_from_unexpected_senders() {
     let phy = UdpPhysicalLayer::new_client(peer_addr.to_string());
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let (events, _task) = spawn_data_collector(&phy);
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
 
     // Push one packet so the peer learns our ephemeral source addr.
     phy.write(&[0xff]).await.unwrap();

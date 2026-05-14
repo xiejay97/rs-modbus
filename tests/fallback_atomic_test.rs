@@ -112,8 +112,8 @@ async fn setup_slave() -> (
         max_concurrent_writes: Arc::new(Mutex::new(0)),
     });
 
-    slave.add(Box::new((*model).clone())).await;
-    slave.open().await.unwrap();
+    slave.add(Box::new((*model).clone()));
+    slave.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
 
     (server, app, slave, model, addr)
@@ -132,7 +132,7 @@ async fn setup_master(addr: &str) -> ModbusMaster<TcpApplicationLayer, TcpClient
             concurrent: false,
         },
     );
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
     master
 }
 

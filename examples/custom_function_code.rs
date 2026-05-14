@@ -54,8 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let application = TcpApplicationLayer::new(physical.clone());
     let slave = ModbusSlave::new(application, physical);
 
-    slave.add(Box::new(CustomModel)).await;
-    slave.open().await?;
+    slave.add(Box::new(CustomModel));
+    slave.open(None).await?;
 
     println!("Slave listening on [::]:502 (default)");
     println!("Custom FC 0x64 (100) will echo back data + 0xAB signature");

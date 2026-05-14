@@ -4,7 +4,7 @@ use async_trait::async_trait;
 #[cfg(feature = "serial")]
 use rs_modbus::layers::application::{RtuApplicationLayer, RtuApplicationLayerOptions};
 #[cfg(feature = "serial")]
-use rs_modbus::layers::physical::SerialPhysicalLayer;
+use rs_modbus::layers::physical::{SerialPhysicalLayer, SerialPhysicalLayerOptions};
 #[cfg(feature = "serial")]
 use rs_modbus::slave::{ModbusSlave, ModbusSlaveModel};
 #[cfg(feature = "serial")]
@@ -110,7 +110,11 @@ impl ModbusSlaveModel for SimpleModel {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open serial port at 9600 baud (adjust path/baud for your hardware)
-    let physical = SerialPhysicalLayer::new("COM1".to_string(), 9600);
+    let physical = SerialPhysicalLayer::new(SerialPhysicalLayerOptions {
+        path: "COM1".to_string(),
+        baud_rate: 9600,
+        ..Default::default()
+    });
     let application = RtuApplicationLayer::new(
         physical.clone(),
         RtuApplicationLayerOptions {
@@ -125,8 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     model.holding_registers.lock().await.insert(1, 0x5678);
     model.coils.lock().await.insert(0, true);
 
-    slave.add(Box::new(model)).await;
-    slave.open().await?;
+    slave.add(Box::new(model));
+    slave.open(()).await?;
 
     println!("RTU Slave listening on COM1 @ 9600 baud");
 

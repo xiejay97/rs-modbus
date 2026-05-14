@@ -40,8 +40,8 @@ async fn fetch_conformity_level(objects: HashMap<u8, String>) -> u8 {
     server_phy.set_addr("127.0.0.1:0".to_string()).await;
     let server_app = TcpApplicationLayer::new(server_phy.clone());
     let slave = ModbusSlave::new(server_app, Arc::clone(&server_phy));
-    slave.add(Box::new(IdentModel { objects })).await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(IdentModel { objects }));
+    slave.open(None).await.unwrap();
 
     let addr = server_phy.get_addr().await.unwrap();
     let client_phy = TcpClientPhysicalLayer::new();
@@ -55,14 +55,14 @@ async fn fetch_conformity_level(objects: HashMap<u8, String>) -> u8 {
             concurrent: false,
         },
     );
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
 
     let res = master
         .read_device_identification(UNIT, 0x01, 0x00, None)
         .await
         .expect("read should succeed")
         .expect("identification should be present");
-    let level = res.conformity_level;
+    let level = res.data.conformity_level;
 
     master.destroy().await;
     slave.destroy().await;

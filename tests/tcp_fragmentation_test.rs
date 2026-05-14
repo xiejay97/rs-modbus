@@ -29,7 +29,7 @@ async fn setup_server() -> (
 ) {
     let physical = TcpServerPhysicalLayer::new();
     physical.set_addr("127.0.0.1:0".to_string()).await;
-    physical.open().await.unwrap();
+    physical.open(None).await.unwrap();
     let addr = physical.get_addr().await.unwrap();
     let application = TcpApplicationLayer::new(physical.clone());
     sleep(Duration::from_millis(30)).await;
@@ -43,7 +43,7 @@ async fn test_reassembles_half_packet() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     let request = mbap_request(1, 1, 0x03, &[0x00, 0x14, 0x00, 0x02]);
@@ -73,7 +73,7 @@ async fn test_splits_sticky_packet() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     let r1 = mbap_request(10, 1, 0x03, &[0x00, 0x14, 0x00, 0x01]);
@@ -106,7 +106,7 @@ async fn test_handles_mixed_full_plus_partial() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     let r1 = mbap_request(20, 1, 0x03, &[0x00, 0x14, 0x00, 0x01]);
@@ -140,7 +140,7 @@ async fn test_handles_byte_by_byte_delivery() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     let request = mbap_request(30, 1, 0x03, &[0x00, 0x14, 0x00, 0x02]);
@@ -168,10 +168,10 @@ async fn test_isolates_multiple_clients_with_interleaved_halves() {
 
     let client_a = TcpClientPhysicalLayer::new();
     client_a.set_addr(addr.clone()).await;
-    client_a.open().await.unwrap();
+    client_a.open(None).await.unwrap();
     let client_b = TcpClientPhysicalLayer::new();
     client_b.set_addr(addr).await;
-    client_b.open().await.unwrap();
+    client_b.open(None).await.unwrap();
     sleep(Duration::from_millis(50)).await;
 
     let r_a = mbap_request(100, 1, 0x03, &[0x00, 0x14, 0x00, 0x01]);
@@ -214,7 +214,7 @@ async fn test_rejects_invalid_protocol_id() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     let mut bogus = mbap_request(300, 1, 0x03, &[0x00, 0x14, 0x00, 0x01]);
@@ -251,7 +251,7 @@ async fn test_caps_buffer_growth_on_absurd_length() {
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     // length field = 0xFFFF → frame would be 0x10005, way past MAX_TCP_FRAME.

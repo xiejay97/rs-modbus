@@ -365,13 +365,13 @@ mod tests {
     async fn test_framing_emits_on_valid_tcp_frame() {
         let server = TcpServerPhysicalLayer::new();
         server.set_addr("127.0.0.1:0".to_string()).await;
-        server.open().await.unwrap();
+        server.open(None).await.unwrap();
         let application = TcpApplicationLayer::new(server.clone());
 
         // Bring up a peer client to push bytes at the server.
         let client = TcpClientPhysicalLayer::new();
         client.set_addr(server.get_addr().await.unwrap()).await;
-        client.open().await.unwrap();
+        client.open(None).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let mut framing_rx = application.subscribe_framing();
@@ -397,12 +397,12 @@ mod tests {
     async fn test_framing_error_on_invalid_tcp_protocol() {
         let server = TcpServerPhysicalLayer::new();
         server.set_addr("127.0.0.1:0".to_string()).await;
-        server.open().await.unwrap();
+        server.open(None).await.unwrap();
         let application = TcpApplicationLayer::new(server.clone());
 
         let client = TcpClientPhysicalLayer::new();
         client.set_addr(server.get_addr().await.unwrap()).await;
-        client.open().await.unwrap();
+        client.open(None).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let mut err_rx = application.subscribe_framing_error();

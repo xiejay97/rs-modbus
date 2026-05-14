@@ -152,11 +152,13 @@ fn client_accepts(remote: &SocketAddr, rinfo: &SocketAddr) -> bool {
 
 #[async_trait::async_trait]
 impl PhysicalLayer for UdpPhysicalLayer {
+    type OpenOptions = Option<String>;
+
     fn layer_type(&self) -> PhysicalLayerType {
         PhysicalLayerType::Net
     }
 
-    async fn open(&self) -> Result<(), ModbusError> {
+    async fn open(&self, options: Self::OpenOptions) -> Result<(), ModbusError> {
         if *self.is_destroyed.lock().await {
             return Err(ModbusError::PortDestroyed);
         }
@@ -169,18 +171,11 @@ impl PhysicalLayer for UdpPhysicalLayer {
         }
         *self.is_opening.lock().await = true;
 
+        let preset = self.local_addr.lock().await.clone();
         let bind_addr = if self.is_server {
-            self.local_addr
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| "[::]:502".to_string())
+            options.or(preset).unwrap_or_else(|| "[::]:502".to_string())
         } else {
-            self.local_addr
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| "0.0.0.0:0".to_string())
+            options.or(preset).unwrap_or_else(|| "0.0.0.0:0".to_string())
         };
         let socket = match UdpSocket::bind(&bind_addr).await {
             Ok(s) => Arc::new(s),

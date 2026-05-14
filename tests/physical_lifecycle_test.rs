@@ -60,7 +60,7 @@ async fn tcp_client_reopens_after_close_and_exchanges_data_again() {
     let mut rx = phy.subscribe_data();
 
     // Session 1
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     assert!(phy.is_open());
     phy.write(&[0x01, 0x02, 0x03]).await.unwrap();
     let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -72,7 +72,7 @@ async fn tcp_client_reopens_after_close_and_exchanges_data_again() {
     assert!(!phy.is_open());
 
     // Session 2: same physical-layer instance, fresh socket under the hood.
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     assert!(phy.is_open());
     phy.write(&[0x0a, 0x0b]).await.unwrap();
     let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -89,7 +89,7 @@ async fn tcp_client_emits_close_event_on_user_initiated_close() {
     let phy = TcpClientPhysicalLayer::new();
     phy.set_addr(addr).await;
     let mut close_rx = phy.subscribe_close();
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.close().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), close_rx.recv())
         .await
@@ -103,8 +103,8 @@ async fn tcp_client_rejects_double_open() {
     let (addr, _stop) = spawn_echo_server().await;
     let phy = TcpClientPhysicalLayer::new();
     phy.set_addr(addr).await;
-    phy.open().await.unwrap();
-    let result = phy.open().await;
+    phy.open(None).await.unwrap();
+    let result = phy.open(None).await;
     assert!(
         matches!(result, Err(ModbusError::PortAlreadyOpen)),
         "expected PortAlreadyOpen, got {:?}",
@@ -118,9 +118,9 @@ async fn tcp_client_rejects_open_and_write_after_destroy() {
     let (addr, _stop) = spawn_echo_server().await;
     let phy = TcpClientPhysicalLayer::new();
     phy.set_addr(addr).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open().await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
     assert!(matches!(
         phy.write(&[0]).await,
         Err(ModbusError::PortNotOpen)
@@ -136,7 +136,7 @@ async fn tcp_server_reopens_after_close_and_accepts_new_client() {
     let mut data_rx = phy.subscribe_data();
 
     // Session 1
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr1 = phy.get_addr().await.unwrap();
     let mut c1 = TcpStream::connect(&addr1).await.unwrap();
     c1.write_all(&[0x42]).await.unwrap();
@@ -152,7 +152,7 @@ async fn tcp_server_reopens_after_close_and_accepts_new_client() {
     // Session 2 — re-bind to a fresh ephemeral port (the previous
     // listener should have been released so a new bind can land).
     phy.set_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr2 = phy.get_addr().await.unwrap();
     let mut c2 = TcpStream::connect(&addr2).await.unwrap();
     c2.write_all(&[0x99]).await.unwrap();
@@ -170,7 +170,7 @@ async fn tcp_server_emits_close_event_on_user_initiated_close() {
     let phy = TcpServerPhysicalLayer::new();
     phy.set_addr("127.0.0.1:0".to_string()).await;
     let mut close_rx = phy.subscribe_close();
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.close().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), close_rx.recv())
         .await
@@ -183,7 +183,7 @@ async fn tcp_server_emits_close_event_on_user_initiated_close() {
 async fn tcp_server_emits_connection_close_for_active_clients_on_close() {
     let phy = TcpServerPhysicalLayer::new();
     phy.set_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr = phy.get_addr().await.unwrap();
 
     let _c1 = TcpStream::connect(&addr).await.unwrap();
@@ -214,8 +214,8 @@ async fn tcp_server_emits_connection_close_for_active_clients_on_close() {
 async fn tcp_server_rejects_double_open() {
     let phy = TcpServerPhysicalLayer::new();
     phy.set_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
-    let result = phy.open().await;
+    phy.open(None).await.unwrap();
+    let result = phy.open(None).await;
     assert!(
         matches!(result, Err(ModbusError::PortAlreadyOpen)),
         "expected PortAlreadyOpen, got {:?}",
@@ -228,9 +228,9 @@ async fn tcp_server_rejects_double_open() {
 async fn tcp_server_rejects_open_after_destroy() {
     let phy = TcpServerPhysicalLayer::new();
     phy.set_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open().await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
 }
 
 // ===== UdpPhysicalLayer — lifecycle (server mode) =====
@@ -242,7 +242,7 @@ async fn udp_reopens_after_close_and_receives_new_datagram() {
     let mut rx = phy.subscribe_data();
 
     // Session 1
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr1 = phy.local_addr().await.unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     sender.send_to(&[0xaa], &addr1).await.unwrap();
@@ -256,7 +256,7 @@ async fn udp_reopens_after_close_and_receives_new_datagram() {
 
     // Session 2 — fresh ephemeral port, fresh dgram socket.
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     let addr2 = phy.local_addr().await.unwrap();
     sender.send_to(&[0xbb], &addr2).await.unwrap();
     let evt = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -272,7 +272,7 @@ async fn udp_emits_close_event_on_user_initiated_close() {
     let phy = UdpPhysicalLayer::new_server();
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
     let mut close_rx = phy.subscribe_close();
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.close().await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), close_rx.recv())
         .await
@@ -285,8 +285,8 @@ async fn udp_emits_close_event_on_user_initiated_close() {
 async fn udp_rejects_double_open() {
     let phy = UdpPhysicalLayer::new_server();
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
-    let result = phy.open().await;
+    phy.open(None).await.unwrap();
+    let result = phy.open(None).await;
     assert!(
         matches!(result, Err(ModbusError::PortAlreadyOpen)),
         "expected PortAlreadyOpen, got {:?}",
@@ -299,9 +299,9 @@ async fn udp_rejects_double_open() {
 async fn udp_rejects_open_after_destroy() {
     let phy = UdpPhysicalLayer::new_server();
     phy.set_local_addr("127.0.0.1:0".to_string()).await;
-    phy.open().await.unwrap();
+    phy.open(None).await.unwrap();
     phy.destroy().await;
-    assert!(matches!(phy.open().await, Err(ModbusError::PortDestroyed)));
+    assert!(matches!(phy.open(None).await, Err(ModbusError::PortDestroyed)));
 }
 
 // ===== SerialPhysicalLayer — lifecycle (no MockBinding in Rust) =====
@@ -314,18 +314,26 @@ async fn udp_rejects_open_after_destroy() {
 #[cfg(feature = "serial")]
 mod serial_lifecycle {
     use super::*;
-    use rs_modbus::layers::physical::SerialPhysicalLayer;
+    use rs_modbus::layers::physical::{SerialPhysicalLayer, SerialPhysicalLayerOptions};
 
     #[tokio::test]
     async fn serial_rejects_open_after_destroy() {
-        let phy = SerialPhysicalLayer::new("/dev/rs-modbus-nonexistent".to_string(), 9600);
+        let phy = SerialPhysicalLayer::new(SerialPhysicalLayerOptions {
+            path: "/dev/rs-modbus-nonexistent".to_string(),
+            baud_rate: 9600,
+            ..Default::default()
+        });
         phy.destroy().await;
-        assert!(matches!(phy.open().await, Err(ModbusError::PortDestroyed)));
+        assert!(matches!(phy.open(()).await, Err(ModbusError::PortDestroyed)));
     }
 
     #[tokio::test]
     async fn serial_close_before_open_is_noop() {
-        let phy = SerialPhysicalLayer::new("/dev/rs-modbus-nonexistent".to_string(), 9600);
+        let phy = SerialPhysicalLayer::new(SerialPhysicalLayerOptions {
+            path: "/dev/rs-modbus-nonexistent".to_string(),
+            baud_rate: 9600,
+            ..Default::default()
+        });
         // close() must succeed on a never-opened layer without panicking.
         phy.close().await.unwrap();
     }

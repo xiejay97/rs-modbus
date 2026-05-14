@@ -121,7 +121,7 @@ struct QueueEntry {
 pub struct ModbusSlave<A: ApplicationLayer, P: PhysicalLayer> {
     application: Arc<A>,
     physical: Arc<P>,
-    pub models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+    pub models: Arc<std::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
     pub concurrent: bool,
     queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -153,7 +153,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         Self {
             application,
             physical,
-            models: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            models: Arc::new(std::sync::Mutex::new(HashMap::new())),
             concurrent: options.concurrent,
             queues: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tasks: tokio::sync::Mutex::new(Vec::new()),
@@ -164,22 +164,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         }
     }
 
-    pub async fn add(&self, model: Box<dyn ModbusSlaveModel>) {
+    pub fn add(&self, model: Box<dyn ModbusSlaveModel>) {
         let unit = model.unit();
-        // Convert to Arc so model references can be cheaply cloned out of
-        // the map and the map lock released before handler invocation.
-        // That's critical for slave-side concurrency: holding the models
-        // mutex across an FC handler's `.await` would serialize every
-        // request slave-wide regardless of which connection it came from.
         let arc: Arc<dyn ModbusSlaveModel> = Arc::from(model);
-        self.models.lock().await.insert(unit, arc);
+        self.models.lock().unwrap().insert(unit, arc);
     }
 
-    pub async fn remove(&self, unit: u8) {
-        self.models.lock().await.remove(&unit);
+    pub fn remove(&self, unit: u8) {
+        self.models.lock().unwrap().remove(&unit);
     }
 
-    pub async fn open(&self) -> Result<(), ModbusError> {
+    pub fn is_open(&self) -> bool {
+        self.is_open.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.clean_level.load(std::sync::atomic::Ordering::Acquire) == 2
+            || self.physical.is_destroyed()
+    }
+
+    pub async fn open(&self, options: P::OpenOptions) -> Result<(), ModbusError> {
         self.is_open
             .store(true, std::sync::atomic::Ordering::Release);
         self.clean_level
@@ -293,7 +297,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
             .await
             .extend([framing_task, conn_close_task, close_task]);
 
-        self.physical.open().await?;
+        self.physical.open(options).await?;
         Ok(())
     }
 
@@ -311,7 +315,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         self.address_locks.lock().await.clear();
         if level == 2 {
             self.custom_function_codes.lock().unwrap().clear();
-            self.models.lock().await.clear();
+            self.models.lock().unwrap().clear();
         }
         self.clean_level
             .store(level, std::sync::atomic::Ordering::Release);
@@ -405,7 +409,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     async fn enqueue_and_drain(
         queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
-        models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: Arc<std::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
         address_locks: Arc<tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>>,
         connection: ConnectionId,
@@ -449,7 +453,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
     async fn drain_loop(
         queues: Arc<tokio::sync::Mutex<HashMap<ConnectionId, QueueEntry>>>,
         application: Arc<A>,
-        models: Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: Arc<std::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: Arc<HashMap<u8, CustomFunctionCode>>,
         address_locks: Arc<tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>>,
         connection: ConnectionId,
@@ -493,7 +497,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
 
     async fn process_frame(
         application: &Arc<A>,
-        models: &Arc<tokio::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
+        models: &Arc<std::sync::Mutex<HashMap<u8, Arc<dyn ModbusSlaveModel>>>>,
         custom_fcs: &HashMap<u8, CustomFunctionCode>,
         address_locks: &tokio::sync::Mutex<HashMap<u16, Arc<tokio::sync::Mutex<()>>>>,
         frame: FramedDataUnit,
@@ -506,7 +510,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusSlave<A, P
         // frames slave-wide. Mirrors the per-connection FIFO goal of
         // Item #4.
         let models_snapshot: Vec<Arc<dyn ModbusSlaveModel>> = {
-            let g = models.lock().await;
+            let g = models.lock().unwrap();
             if unit == 0 {
                 g.values().map(Arc::clone).collect()
             } else {

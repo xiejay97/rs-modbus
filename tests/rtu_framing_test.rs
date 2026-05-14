@@ -38,7 +38,7 @@ async fn setup() -> (
 ) {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
     // RTU layer bound to Net transport (no inter-frame timer).
     let application =
@@ -48,7 +48,7 @@ async fn setup() -> (
 
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
 
     (server, application, client)

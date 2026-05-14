@@ -36,11 +36,15 @@ pub struct DataEvent {
 
 #[async_trait::async_trait]
 pub trait PhysicalLayer: Send + Sync {
+    /// Options forwarded to [`PhysicalLayer::open`] from `ModbusMaster::open` /
+    /// `ModbusSlave::open`. Mirrors njs-modbus `open(...args)` semantics.
+    type OpenOptions: Default + Send + Sync;
+
     /// Distinguishes serial vs network transports. Used by the RTU
     /// application layer to decide whether to apply 3.5T inter-frame timing.
     fn layer_type(&self) -> PhysicalLayerType;
 
-    async fn open(&self) -> Result<(), ModbusError>;
+    async fn open(&self, options: Self::OpenOptions) -> Result<(), ModbusError>;
     async fn write(&self, data: &[u8]) -> Result<(), ModbusError>;
     async fn close(&self) -> Result<(), ModbusError>;
     async fn destroy(&self);
@@ -77,7 +81,11 @@ pub use udp::{UdpPhysicalLayer, UdpPhysicalLayerOptions};
 #[cfg(feature = "serial")]
 mod serial;
 #[cfg(feature = "serial")]
-pub use serial::SerialPhysicalLayer;
+pub use serial::{SerialPhysicalLayer, SerialPhysicalLayerOptions};
+#[cfg(feature = "serial")]
+/// Re-exported so callers can set data/stop bits, parity, and flow control
+/// without adding `serialport` as a direct dependency.
+pub use serialport::{DataBits, FlowControl, Parity, StopBits};
 
 #[cfg(test)]
 mod tests {
@@ -120,14 +128,14 @@ mod tests {
     async fn test_tcp_client_server_communication() {
         let server = TcpServerPhysicalLayer::new();
         server.set_addr("127.0.0.1:0".to_string()).await;
-        server.open().await.unwrap();
+        server.open(None).await.unwrap();
         assert_eq!(server.layer_type(), PhysicalLayerType::Net);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let client = TcpClientPhysicalLayer::new();
         client.set_addr(server.get_addr().await.unwrap()).await;
-        client.open().await.unwrap();
+        client.open(None).await.unwrap();
         assert_eq!(client.layer_type(), PhysicalLayerType::Net);
 
         let mut server_rx = server.subscribe_data();
@@ -165,7 +173,7 @@ mod tests {
     async fn test_udp_communication() {
         let server = UdpPhysicalLayer::new_server();
         *server.local_addr.lock().await = Some("127.0.0.1:0".to_string());
-        server.open().await.unwrap();
+        server.open(None).await.unwrap();
         assert_eq!(server.layer_type(), PhysicalLayerType::Net);
 
         let server_addr = {
@@ -175,7 +183,7 @@ mod tests {
 
         let client = UdpPhysicalLayer::new_client(server_addr.to_string());
         *client.local_addr.lock().await = Some("127.0.0.1:0".to_string());
-        client.open().await.unwrap();
+        client.open(None).await.unwrap();
 
         let mut server_rx = server.subscribe_data();
         let mut client_rx = client.subscribe_data();
@@ -208,7 +216,7 @@ mod tests {
     async fn test_tcp_server_emits_connection_close() {
         let server = TcpServerPhysicalLayer::new();
         server.set_addr("127.0.0.1:0".to_string()).await;
-        server.open().await.unwrap();
+        server.open(None).await.unwrap();
 
         let mut close_rx = server.subscribe_connection_close();
 
@@ -216,7 +224,7 @@ mod tests {
 
         let client = TcpClientPhysicalLayer::new();
         client.set_addr(server.get_addr().await.unwrap()).await;
-        client.open().await.unwrap();
+        client.open(None).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         client.destroy().await;

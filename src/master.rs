@@ -3,7 +3,8 @@ use crate::layers::application::{ApplicationLayer, ApplicationProtocol, Applicat
 use crate::layers::physical::PhysicalLayer;
 use crate::master_session::{MasterSession, PreCheck, PreCheckOutcome, WaiterKey};
 use crate::types::{
-    ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, ServerId,
+    ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject, MasterResponse,
+    ServerId,
 };
 use crate::utils::{parse_coils, parse_registers};
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
@@ -122,13 +123,21 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         self.clean_level.store(level, Ordering::Release);
     }
 
-    pub async fn open(&self) -> Result<(), ModbusError> {
+    pub fn is_open(&self) -> bool {
+        self.physical.is_open()
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.clean_level.load(Ordering::Acquire) == 2 || self.physical.is_destroyed()
+    }
+
+    pub async fn open(&self, options: P::OpenOptions) -> Result<(), ModbusError> {
         if self.clean_level.load(Ordering::Acquire) == 2 {
             return Err(ModbusError::PortDestroyed);
         }
         self.clean_level.store(0, Ordering::Release);
         self.next_tid.store(1, Ordering::Release);
-        self.physical.open().await?;
+        self.physical.open(options).await?;
         Ok(())
     }
 
@@ -303,7 +312,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         length: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<bool>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
         let fc = 0x01;
         let byte_count = ((length + 7) / 8) as usize;
 
@@ -326,9 +335,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(parse_coils(&f.adu.data, length))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: parse_coils(&f.adu.data, length),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_coils`].
+    pub async fn write_fc1(
+        &self,
+        unit: u8,
+        address: u16,
+        length: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
+        self.read_coils(unit, address, length, timeout_ms).await
     }
 
     // FC2 - Read Discrete Inputs
@@ -338,7 +364,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         length: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<bool>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
         let fc = 0x02;
         let byte_count = ((length + 7) / 8) as usize;
 
@@ -361,9 +387,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(parse_coils(&f.adu.data, length))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: parse_coils(&f.adu.data, length),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_discrete_inputs`].
+    pub async fn write_fc2(
+        &self,
+        unit: u8,
+        address: u16,
+        length: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
+        self.read_discrete_inputs(unit, address, length, timeout_ms).await
     }
 
     // FC3 - Read Holding Registers
@@ -373,7 +416,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         length: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u16>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
         let fc = 0x03;
         let byte_count = (length * 2) as usize;
 
@@ -396,9 +439,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(parse_registers(&f.adu.data, length))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: parse_registers(&f.adu.data, length),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_holding_registers`].
+    pub async fn write_fc3(
+        &self,
+        unit: u8,
+        address: u16,
+        length: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
+        self.read_holding_registers(unit, address, length, timeout_ms).await
     }
 
     // FC4 - Read Input Registers
@@ -408,7 +468,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         length: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u16>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
         let fc = 0x04;
         let byte_count = (length * 2) as usize;
 
@@ -431,9 +491,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(parse_registers(&f.adu.data, length))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: parse_registers(&f.adu.data, length),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_input_registers`].
+    pub async fn write_fc4(
+        &self,
+        unit: u8,
+        address: u16,
+        length: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
+        self.read_input_registers(unit, address, length, timeout_ms).await
     }
 
     // FC5 - Write Single Coil
@@ -443,7 +520,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         value: bool,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<bool>, ModbusError> {
+    ) -> Result<Option<MasterResponse<bool>>, ModbusError> {
         let fc = 0x05;
 
         let mut buf = vec![0u8; 4];
@@ -466,9 +543,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(_) => Ok(Some(value)),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: value,
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::write_single_coil`].
+    pub async fn write_fc5(
+        &self,
+        unit: u8,
+        address: u16,
+        value: bool,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<bool>>, ModbusError> {
+        self.write_single_coil(unit, address, value, timeout_ms).await
     }
 
     // FC6 - Write Single Register
@@ -478,7 +572,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         value: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<u16>, ModbusError> {
+    ) -> Result<Option<MasterResponse<u16>>, ModbusError> {
         let fc = 0x06;
 
         let mut buf = vec![0u8; 4];
@@ -500,9 +594,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(_) => Ok(Some(value)),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: value,
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::write_single_register`].
+    pub async fn write_fc6(
+        &self,
+        unit: u8,
+        address: u16,
+        value: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<u16>>, ModbusError> {
+        self.write_single_register(unit, address, value, timeout_ms).await
     }
 
     // FC15 - Write Multiple Coils
@@ -512,7 +623,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         values: &[bool],
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<bool>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
         let fc = 0x0f;
         let byte_count = ((values.len() + 7) / 8) as u8;
 
@@ -546,9 +657,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(_) => Ok(Some(values.to_vec())),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: values.to_vec(),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::write_multiple_coils`].
+    pub async fn write_fc15(
+        &self,
+        unit: u8,
+        address: u16,
+        values: &[bool],
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<bool>>>, ModbusError> {
+        self.write_multiple_coils(unit, address, values, timeout_ms).await
     }
 
     // FC16 - Write Multiple Registers
@@ -558,7 +686,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         address: u16,
         values: &[u16],
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u16>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
         let fc = 0x10;
         let byte_count = (values.len() * 2) as u8;
 
@@ -586,9 +714,26 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(_) => Ok(Some(values.to_vec())),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: values.to_vec(),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::write_multiple_registers`].
+    pub async fn write_fc16(
+        &self,
+        unit: u8,
+        address: u16,
+        values: &[u16],
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
+        self.write_multiple_registers(unit, address, values, timeout_ms).await
     }
 
     // FC17 - Report Server ID
@@ -597,7 +742,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         unit: u8,
         server_id_length: usize,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<ServerId>, ModbusError> {
+    ) -> Result<Option<MasterResponse<ServerId>>, ModbusError> {
         let fc = 0x11;
         let request = ApplicationDataUnit::new(unit, fc, vec![]);
 
@@ -625,14 +770,30 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
                 if f.adu.data.len() < run_status_index + 1 {
                     return Err(ModbusError::InvalidResponse);
                 }
-                Ok(Some(ServerId {
-                    server_id: f.adu.data[1..run_status_index].to_vec(),
-                    run_indicator_status: f.adu.data[run_status_index] == 0xff,
-                    additional_data: f.adu.data[run_status_index + 1..].to_vec(),
+                Ok(Some(MasterResponse {
+                    transaction: f.adu.transaction,
+                    unit: f.adu.unit,
+                    fc: f.adu.fc,
+                    data: ServerId {
+                        server_id: f.adu.data[1..run_status_index].to_vec(),
+                        run_indicator_status: f.adu.data[run_status_index] == 0xff,
+                        additional_data: f.adu.data[run_status_index + 1..].to_vec(),
+                    },
+                    raw: f.raw,
                 }))
             }
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::report_server_id`].
+    pub async fn handle_fc17(
+        &self,
+        unit: u8,
+        server_id_length: usize,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<ServerId>>, ModbusError> {
+        self.report_server_id(unit, server_id_length, timeout_ms).await
     }
 
     // FC22 - Mask Write Register
@@ -643,7 +804,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         and_mask: u16,
         or_mask: u16,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<(u16, u16)>, ModbusError> {
+    ) -> Result<Option<MasterResponse<(u16, u16)>>, ModbusError> {
         let fc = 0x16;
 
         let mut buf = vec![0u8; 6];
@@ -666,9 +827,27 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(_) => Ok(Some((and_mask, or_mask))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: (and_mask, or_mask),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::mask_write_register`].
+    pub async fn handle_fc22(
+        &self,
+        unit: u8,
+        address: u16,
+        and_mask: u16,
+        or_mask: u16,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<(u16, u16)>>, ModbusError> {
+        self.mask_write_register(unit, address, and_mask, or_mask, timeout_ms).await
     }
 
     // FC23 - Read/Write Multiple Registers
@@ -680,7 +859,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         write_address: u16,
         write_values: &[u16],
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u16>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
         let fc = 0x17;
         let byte_count = (write_values.len() * 2) as u8;
 
@@ -710,9 +889,28 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             .await?;
 
         match frame {
-            Some(f) => Ok(Some(parse_registers(&f.adu.data, read_length))),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: parse_registers(&f.adu.data, read_length),
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_and_write_multiple_registers`].
+    pub async fn handle_fc23(
+        &self,
+        unit: u8,
+        read_address: u16,
+        read_length: u16,
+        write_address: u16,
+        write_values: &[u16],
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<Vec<u16>>>, ModbusError> {
+        self.read_and_write_multiple_registers(unit, read_address, read_length, write_address, write_values, timeout_ms).await
     }
 
     // FC43/14 - Read Device Identification
@@ -722,7 +920,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         read_device_id_code: u8,
         object_id: u8,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<DeviceIdentification>, ModbusError> {
+    ) -> Result<Option<MasterResponse<DeviceIdentification>>, ModbusError> {
         let fc = 0x2b;
         let request =
             ApplicationDataUnit::new(unit, fc, vec![0x0e, read_device_id_code, object_id]);
@@ -775,16 +973,33 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
                     });
                     idx += 2 + obj_len;
                 }
-                Ok(Some(DeviceIdentification {
-                    read_device_id_code: f.adu.data[1],
-                    conformity_level: f.adu.data[2],
-                    more_follows: f.adu.data[3] == 0xff,
-                    next_object_id: f.adu.data[4],
-                    objects,
+                Ok(Some(MasterResponse {
+                    transaction: f.adu.transaction,
+                    unit: f.adu.unit,
+                    fc: f.adu.fc,
+                    data: DeviceIdentification {
+                        read_device_id_code: f.adu.data[1],
+                        conformity_level: f.adu.data[2],
+                        more_follows: f.adu.data[3] == 0xff,
+                        next_object_id: f.adu.data[4],
+                        objects,
+                    },
+                    raw: f.raw,
                 }))
             }
             None => Ok(None),
         }
+    }
+
+    /// Alias for [`Self::read_device_identification`].
+    pub async fn handle_fc43_14(
+        &self,
+        unit: u8,
+        read_device_id_code: u8,
+        object_id: u8,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<MasterResponse<DeviceIdentification>>, ModbusError> {
+        self.read_device_identification(unit, read_device_id_code, object_id, timeout_ms).await
     }
 
     pub fn add_custom_function_code(&self, cfc: CustomFunctionCode) {
@@ -808,7 +1023,7 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
         fc: u8,
         data: Vec<u8>,
         timeout_ms: Option<u64>,
-    ) -> Result<Option<Vec<u8>>, ModbusError> {
+    ) -> Result<Option<MasterResponse<Vec<u8>>>, ModbusError> {
         let request = ApplicationDataUnit::new(unit, fc, data);
         let frame = self
             .wait_response(
@@ -818,7 +1033,13 @@ impl<A: ApplicationLayer + 'static, P: PhysicalLayer + 'static> ModbusMaster<A, 
             )
             .await?;
         match frame {
-            Some(f) => Ok(Some(f.adu.data)),
+            Some(f) => Ok(Some(MasterResponse {
+                transaction: f.adu.transaction,
+                unit: f.adu.unit,
+                fc: f.adu.fc,
+                data: f.adu.data,
+                raw: f.raw,
+            })),
             None => Ok(None),
         }
     }

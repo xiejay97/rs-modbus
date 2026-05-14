@@ -47,8 +47,8 @@ async fn round_trip_multibyte_utf8_value() {
     ident.insert(0x00, "Vend\u{e9}r".to_string()); // é = 2 UTF-8 bytes
     ident.insert(0x01, "ProductCode".to_string());
     ident.insert(0x02, "MajorMinorRevision".to_string());
-    slave.add(Box::new(Utf8IdentModel { ident })).await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(Utf8IdentModel { ident }));
+    slave.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
 
     let client = TcpClientPhysicalLayer::new();
@@ -62,7 +62,7 @@ async fn round_trip_multibyte_utf8_value() {
             concurrent: false,
         },
     );
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
 
     let result = master
         .read_device_identification(UNIT, 0x01, 0x00, None)
@@ -71,9 +71,9 @@ async fn round_trip_multibyte_utf8_value() {
     let device = result
         .expect("should receive device identification")
         .expect("non-empty response");
-    assert_eq!(device.objects.len(), 3);
-    assert_eq!(device.objects[0].id, 0x00);
-    assert_eq!(device.objects[0].value, "Vend\u{e9}r");
+    assert_eq!(device.data.objects.len(), 3);
+    assert_eq!(device.data.objects[0].id, 0x00);
+    assert_eq!(device.data.objects[0].value, "Vend\u{e9}r");
 
     master.destroy().await;
     slave.destroy().await;

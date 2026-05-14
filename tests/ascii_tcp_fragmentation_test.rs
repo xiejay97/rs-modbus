@@ -42,13 +42,13 @@ async fn setup() -> (
 ) {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
     let application = AsciiApplicationLayer::new(server.clone());
     sleep(Duration::from_millis(30)).await;
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
     (server, application, client)
 }
@@ -118,7 +118,7 @@ async fn test_isolates_multiple_clients_with_interleaved_halves() {
     // second client connected to same server
     let client_b = TcpClientPhysicalLayer::new();
     client_b.set_addr(server.get_addr().await.unwrap()).await;
-    client_b.open().await.unwrap();
+    client_b.open(None).await.unwrap();
     sleep(Duration::from_millis(50)).await;
 
     let r_a = ascii_frame(1, 0x03, &[0x00, 0x14, 0x00, 0x01]);

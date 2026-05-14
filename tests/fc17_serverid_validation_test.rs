@@ -43,14 +43,12 @@ async fn setup() -> (
     let server_app = TcpApplicationLayer::new(server_physical.clone());
     let slave = ModbusSlave::new(server_app, server_physical.clone());
 
-    slave
-        .add(Box::new(TestModel {
-            server_id: vec![1],
-            run_indicator: true,
-            additional_data: vec![],
-        }))
-        .await;
-    slave.open().await.unwrap();
+    slave.add(Box::new(TestModel {
+        server_id: vec![1],
+        run_indicator: true,
+        additional_data: vec![],
+    }));
+    slave.open(None).await.unwrap();
 
     let addr = server_physical.get_addr().await.unwrap();
 
@@ -67,7 +65,7 @@ async fn setup() -> (
         },
     );
 
-    master.open().await.unwrap();
+    master.open(None).await.unwrap();
     (slave, master)
 }
 
@@ -75,20 +73,18 @@ async fn setup() -> (
 async fn accepts_multi_byte_server_id() {
     let (slave, master) = setup().await;
 
-    slave
-        .add(Box::new(TestModel {
-            server_id: vec![0x01, 0x02, 0x03],
-            run_indicator: true,
-            additional_data: vec![0xab, 0xcd],
-        }))
-        .await;
+    slave.add(Box::new(TestModel {
+        server_id: vec![0x01, 0x02, 0x03],
+        run_indicator: true,
+        additional_data: vec![0xab, 0xcd],
+    }));
 
     let res = master.report_server_id(1, 3, None).await.unwrap();
     assert!(res.is_some());
     let sid = res.unwrap();
-    assert_eq!(sid.server_id, vec![0x01, 0x02, 0x03]);
-    assert!(sid.run_indicator_status);
-    assert_eq!(sid.additional_data, vec![0xab, 0xcd]);
+    assert_eq!(sid.data.server_id, vec![0x01, 0x02, 0x03]);
+    assert!(sid.data.run_indicator_status);
+    assert_eq!(sid.data.additional_data, vec![0xab, 0xcd]);
 
     master.destroy().await;
     slave.destroy().await;
@@ -99,13 +95,11 @@ async fn rejects_bytecount_overflow() {
     let (slave, master) = setup().await;
 
     // server_id(1) + run_status(1) + additional_data(254) = 256 > 255
-    slave
-        .add(Box::new(TestModel {
-            server_id: vec![1],
-            run_indicator: true,
-            additional_data: vec![0; 254],
-        }))
-        .await;
+    slave.add(Box::new(TestModel {
+        server_id: vec![1],
+        run_indicator: true,
+        additional_data: vec![0; 254],
+    }));
 
     let res = master.report_server_id(1, 1, None).await;
     assert!(
@@ -123,20 +117,18 @@ async fn accepts_large_additional_data_within_tcp_limit() {
     let (slave, master) = setup().await;
 
     let n = 200;
-    slave
-        .add(Box::new(TestModel {
-            server_id: vec![1],
-            run_indicator: true,
-            additional_data: vec![0xab; n],
-        }))
-        .await;
+    slave.add(Box::new(TestModel {
+        server_id: vec![1],
+        run_indicator: true,
+        additional_data: vec![0xab; n],
+    }));
 
     let res = master.report_server_id(1, 1, None).await.unwrap();
     assert!(res.is_some());
     let sid = res.unwrap();
-    assert_eq!(sid.additional_data.len(), n);
-    assert_eq!(sid.additional_data[0], 0xab);
-    assert_eq!(sid.additional_data[n - 1], 0xab);
+    assert_eq!(sid.data.additional_data.len(), n);
+    assert_eq!(sid.data.additional_data[0], 0xab);
+    assert_eq!(sid.data.additional_data[n - 1], 0xab);
 
     master.destroy().await;
     slave.destroy().await;

@@ -68,13 +68,13 @@ async fn setup_strict() -> (
 ) {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
     let application = AsciiApplicationLayer::new(server.clone());
     sleep(Duration::from_millis(30)).await;
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
     (server, application, client)
 }
@@ -86,7 +86,7 @@ async fn setup_lenient() -> (
 ) {
     let server = TcpServerPhysicalLayer::new();
     server.set_addr("127.0.0.1:0".to_string()).await;
-    server.open().await.unwrap();
+    server.open(None).await.unwrap();
     let addr = server.get_addr().await.unwrap();
     let application = AsciiApplicationLayer::with_options(
         server.clone(),
@@ -95,7 +95,7 @@ async fn setup_lenient() -> (
     sleep(Duration::from_millis(30)).await;
     let client = TcpClientPhysicalLayer::new();
     client.set_addr(addr).await;
-    client.open().await.unwrap();
+    client.open(None).await.unwrap();
     sleep(Duration::from_millis(30)).await;
     (server, application, client)
 }

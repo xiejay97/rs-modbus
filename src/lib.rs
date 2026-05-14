@@ -63,9 +63,9 @@
 //!         },
 //!     );
 //!
-//!     master.open().await?;
+//!     master.open(None).await?;
 //!     let res = master.read_holding_registers(1, 0, 10, None).await?;
-//!     println!("{:?}", res);
+//!     println!("{:?}", res.map(|r| r.data));
 //!     master.destroy().await;
 //!
 //!     Ok(())
@@ -102,8 +102,8 @@
 //!     let application = TcpApplicationLayer::new(physical.clone());
 //!     let slave = ModbusSlave::new(application, physical);
 //!
-//!     slave.add(Box::new(SimpleModel)).await;
-//!     slave.open().await?;
+//!     slave.add(Box::new(SimpleModel));
+//!     slave.open(None).await?;
 //!
 //!     Ok(())
 //! }
@@ -127,7 +127,7 @@ pub use master_session::{MasterSession, PreCheck, PreCheckOutcome};
 pub use slave::{ModbusSlave, ModbusSlaveModel, ModbusSlaveOptions};
 pub use types::{
     AddressRange, ApplicationDataUnit, CustomFunctionCode, DeviceIdentification, DeviceObject,
-    FramedDataUnit, ServerId,
+    FramedDataUnit, MasterResponse, ServerId,
 };
 pub use vars::{
     limits, ConformityLevel, FunctionCode, ReadDeviceIdCode, COIL_OFF, COIL_ON, EXCEPTION_OFFSET,
